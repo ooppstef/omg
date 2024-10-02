@@ -38,4 +38,7 @@ class StockCurrentPrice:
             return f"{self.change_percent}%"  # 默认白色
 
     def __str__(self):
-        return f"{self.name} - {self.colored_change_percent()} - {self.amount_in_billion()}亿"
+        if self.amount_in_billion() == 0.0:
+            return f"{self.name} - {self.colored_change_percent()}"
+        else:
+            return f"{self.name} - {self.colored_change_percent()} - {self.amount_in_billion()}亿"

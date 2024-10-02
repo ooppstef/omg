@@ -1,13 +1,20 @@
 import argparse
 import stocks.main as stocks
+import stocks.ana as ana
 
 
 def main():
     parser = argparse.ArgumentParser(description="基本命令")
-    parser.add_argument("command", nargs="?", choices=["go"], help="执行的命令")
+    parser.add_argument(
+        "command", nargs="?", choices=["list", "hot", "notice"], help="执行的命令"
+    )
     args = parser.parse_args()
-    if args.command == "go":
-        stocks.go()
+    if args.command == "list":
+        stocks.my_list()
+    elif args.command == "notice":
+        stocks.notice()
+    elif args.command == "hot":
+        stocks.hot()
     else:
         print("请输入mock url")
 
