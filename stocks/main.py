@@ -13,4 +13,5 @@ def notice():
 
 
 def hot():
-    ana.ths_top_list()
+    ana.east_top_list()
+    # ana.hot_concept_ths()
