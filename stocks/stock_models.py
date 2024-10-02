@@ -6,6 +6,10 @@ class StockBase:
         self.short = short
         self.exchange = exchange
 
+    @classmethod
+    def init_with_code(cls, code):
+        return cls(None, code, "", "", "")
+
     def __str__(self):
         return f"{self.code} {self.name} {self.short} {self.exchange}"
 
