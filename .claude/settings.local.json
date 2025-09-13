@@ -3,7 +3,8 @@
     "allow": [
       "Bash(pip install:*)",
       "Bash(omg list:*)",
-      "Bash(touch:*)"
+      "Bash(touch:*)",
+      "Bash(rm:*)"
     ],
     "deny": [],
     "ask": []
