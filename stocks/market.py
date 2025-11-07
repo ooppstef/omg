@@ -35,14 +35,34 @@ def get_index_current_price(index_code, index_name):
             return None
 
         row = res_df.iloc[0]
-
-        # 计算涨跌幅
         price = float(row["price"])
-        open_price = float(row["open"])
-        if open_price != 0:
-            change_pct = ((price - open_price) / open_price) * 100
-        else:
-            change_pct = 0.0
+
+        # 尝试获取历史数据以计算涨跌幅
+        try:
+            # 获取历史K线数据（包含昨日收盘价）
+            hist_df = adata.stock.market.ths_index.get_market_index(index_code)
+
+            if hist_df is not None and len(hist_df) >= 1:
+                # 获取昨日收盘价（最后一行是最近的完整交易日）
+                pre_close = float(hist_df.iloc[-1]["close"])
+                if pre_close != 0:
+                    change_pct = ((price - pre_close) / pre_close) * 100
+                else:
+                    change_pct = 0.0
+            else:
+                # 如果无法获取历史数据，使用开盘价计算（次优方案）
+                open_price = float(row["open"])
+                if open_price != 0:
+                    change_pct = ((price - open_price) / open_price) * 100
+                else:
+                    change_pct = 0.0
+        except Exception:
+            # 出错时使用开盘价计算
+            open_price = float(row["open"])
+            if open_price != 0:
+                change_pct = ((price - open_price) / open_price) * 100
+            else:
+                change_pct = 0.0
 
         return StockCurrentPrice(
             index_code,
