@@ -37,18 +37,24 @@ def get_index_current_price(index_code, index_name):
         row = res_df.iloc[0]
         price = float(row["price"])
 
-        # 尝试获取历史数据以计算涨跌幅
+        # 尝试获取历史数据以获取正确的涨跌幅
         try:
-            # 获取历史K线数据（包含昨日收盘价）
+            # 获取历史K线数据
             hist_df = adata.stock.market.ths_index.get_market_index(index_code)
 
             if hist_df is not None and len(hist_df) >= 1:
-                # 获取昨日收盘价（最后一行是最近的完整交易日）
-                pre_close = float(hist_df.iloc[-1]["close"])
-                if pre_close != 0:
-                    change_pct = ((price - pre_close) / pre_close) * 100
+                # 检查历史数据中是否有今日数据且包含change_pct字段
+                latest_row = hist_df.iloc[-1]
+                if "change_pct" in latest_row and len(hist_df) >= 1:
+                    # 使用历史数据中的涨跌幅（更准确）
+                    change_pct = float(latest_row["change_pct"])
                 else:
-                    change_pct = 0.0
+                    # 如果没有change_pct，使用开盘价计算
+                    open_price = float(row["open"])
+                    if open_price != 0:
+                        change_pct = ((price - open_price) / open_price) * 100
+                    else:
+                        change_pct = 0.0
             else:
                 # 如果无法获取历史数据，使用开盘价计算（次优方案）
                 open_price = float(row["open"])
