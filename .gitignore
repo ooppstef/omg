@@ -4,3 +4,4 @@ charles_stock_tools.egg-info/*
 __pycache__/*
 .serena/*
 my_list.txt
+*/.serena/*
