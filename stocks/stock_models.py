@@ -26,7 +26,7 @@ class StockCurrentPrice:
         try:
             amount = float(self.amount)
             return round(amount / 100000000, 2)
-        except ValueError:
+        except (TypeError, ValueError):
             return 0.0
 
     def colored_change_percent(self):
@@ -37,8 +37,15 @@ class StockCurrentPrice:
         else:
             return f"{self.change_percent}%"  # 默认白色
 
+    def price_text(self):
+        try:
+            return f"{float(self.price):.2f}"
+        except (TypeError, ValueError):
+            return str(self.price) if self.price is not None else "--"
+
     def __str__(self):
-        if self.amount_in_billion() == 0.0:
-            return f"{self.name} - {self.colored_change_percent()}"
-        else:
-            return f"{self.name} - {self.colored_change_percent()} - {self.amount_in_billion()}亿"
+        parts = [f"{self.name} {self.price_text()}", self.colored_change_percent()]
+        amount = self.amount_in_billion()
+        if amount:
+            parts.append(f"{amount}亿")
+        return " - ".join(parts)
