@@ -233,86 +233,94 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
     return daily_top
 
 
-def concept_strength_chart(concept_name, days=10):
+def concept_strength_chart(concept_names, days=10):
     """
-    绘制指定概念板块的强度曲线
-    concept_name: 板块名称（支持模糊匹配）
+    绘制概念板块的强度曲线（支持多板块对比）
+    concept_names: 板块名称或列表（支持模糊匹配）
     """
     import matplotlib.pyplot as plt
+    import math
+    
+    if isinstance(concept_names, str):
+        concept_names = [concept_names]
     
     # 设置中文字体
     plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'PingFang SC']
     plt.rcParams['axes.unicode_minus'] = False
     
     start_date = get_recent_date(days + 15)
-    
-    # 查找板块
     concept_df = adata.stock.info.all_concept_code_ths()
-    matches = concept_df[concept_df['name'].str.contains(concept_name, na=False)]
-    if matches.empty:
-        print(f"未找到包含'{concept_name}'的板块")
-        return None
     
-    row = matches.iloc[0]
-    code, name = row['index_code'], row['name']
-    print(f"匹配到板块: {name} ({code})")
-    
-    # 获取基准和板块数据
+    # 获取基准
     benchmark = _get_benchmark_returns(start_date, days, verbose=False)
     if not benchmark:
         print("获取基准数据失败")
         return None
     
-    try:
-        df = adata.stock.market.get_market_concept_ths(index_code=code)
-        if df is None or df.empty:
-            print("获取板块数据失败")
-            return None
-    except Exception as e:
-        print(f"获取数据失败: {e}")
-        return None
+    # 收集所有板块数据
+    all_series = {}
+    all_dates = None
     
-    df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
-    df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
-    
-    # 计算每天强度
-    dates, strengths = [], []
-    median_amount = df['amount'].median() or 1
-    
-    for _, r in df.iterrows():
-        date = str(r['trade_date'])[:10]
-        if date not in benchmark:
+    for concept_name in concept_names:
+        matches = concept_df[concept_df['name'].str.contains(concept_name, na=False)]
+        if matches.empty:
+            print(f"未找到包含'{concept_name}'的板块")
             continue
-        excess = float(r.get('change_pct', 0) or 0) - benchmark[date]
-        amount = float(r.get('amount', 0) or 0)
-        import math
-        ratio = amount / median_amount
-        strength = excess * (1 + math.log(ratio + 1)) if ratio > 0 else excess
-        dates.append(date[-5:])
-        strengths.append(round(strength, 2))
+        
+        row = matches.iloc[0]
+        code, name = row['index_code'], row['name']
+        print(f"匹配到板块: {name} ({code})")
+        
+        try:
+            df = adata.stock.market.get_market_concept_ths(index_code=code)
+            if df is None or df.empty:
+                print(f"获取{name}数据失败")
+                continue
+        except Exception as e:
+            print(f"获取{name}数据失败: {e}")
+            continue
+        
+        df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+        median_amount = df['amount'].median() or 1
+        
+        dates, strengths = [], []
+        for _, r in df.iterrows():
+            date = str(r['trade_date'])[:10]
+            if date not in benchmark:
+                continue
+            excess = float(r.get('change_pct', 0) or 0) - benchmark[date]
+            amount = float(r.get('amount', 0) or 0)
+            ratio = amount / median_amount
+            strength = excess * (1 + math.log(ratio + 1)) if ratio > 0 else excess
+            dates.append(date[-5:])
+            strengths.append(round(strength, 2))
+        
+        if dates:
+            all_series[name] = strengths
+            if all_dates is None:
+                all_dates = dates
     
-    if not dates:
+    if not all_series:
         print("无有效数据")
         return None
     
     # 绘图
-    fig, ax = plt.subplots(figsize=(10, 5))
-    colors = ['red' if s >= 0 else 'green' for s in strengths]
-    ax.bar(dates, strengths, color=colors, alpha=0.7)
-    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    ax.plot(dates, strengths, 'o-', color='blue', markersize=4)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    colors = ['#E53935', '#1E88E5', '#43A047', '#FB8C00', '#8E24AA', '#00ACC1']
     
-    ax.set_title(f'{name} 近{len(dates)}天绝对强度')
+    for i, (name, strengths) in enumerate(all_series.items()):
+        color = colors[i % len(colors)]
+        ax.plot(all_dates, strengths, 'o-', label=name, color=color, markersize=5, linewidth=2)
+    
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    ax.set_title(f'概念板块绝对强度对比 (近{len(all_dates)}天)')
     ax.set_xlabel('日期')
     ax.set_ylabel('绝对强度')
+    ax.legend(loc='best')
     ax.grid(True, alpha=0.3)
-    
-    # 标注数值
-    for i, (d, s) in enumerate(zip(dates, strengths)):
-        ax.annotate(f'{s}', (i, s), textcoords="offset points", 
-                   xytext=(0, 5 if s >= 0 else -12), ha='center', fontsize=8)
     
     plt.tight_layout()
     plt.show()
     
-    return {'dates': dates, 'strengths': strengths}
+    return all_series

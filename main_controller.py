@@ -9,12 +9,16 @@ def main():
         "command", nargs="?", choices=["list", "hot", "notice"], help="执行的命令"
     )
     parser.add_argument(
-        "-k", type=str, metavar="概念", help="绘制概念板块强度曲线"
+        "-k", type=str, nargs='+', metavar="概念", help="绘制概念板块强度曲线，支持多个板块对比"
     )
     args = parser.parse_args()
     
     if args.k:
-        stocks.k(args.k)
+        # 合并参数并按多种分隔符拆分
+        import re
+        combined = ' '.join(args.k)
+        concepts = [c.strip() for c in re.split(r'[,，\s]+', combined) if c.strip()]
+        stocks.k(concepts)
     elif args.command == "list":
         stocks.my_list()
     elif args.command == "notice":

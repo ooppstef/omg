@@ -30,6 +30,8 @@ def hot():
     ana.concept_strength_top10()
 
 
-def k(concept_name):
+def k(concept_names):
     """绘制概念板块强度曲线"""
-    ana.concept_strength_chart(concept_name)
+    if isinstance(concept_names, str):
+        concept_names = [concept_names]
+    ana.concept_strength_chart(concept_names)
