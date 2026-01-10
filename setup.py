@@ -12,6 +12,6 @@ setup(
             "omg=main_controller:main",
         ],
     },
-    install_requires=["requests", "adata", "pypinyin"],
+    install_requires=["requests", "adata", "pypinyin", "pandas"],
     include_package_data=True,
 )

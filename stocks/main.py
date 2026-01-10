@@ -27,5 +27,5 @@ def notice():
 
 
 def hot():
-    ana.east_top_list()
+    ana.concept_strength_top10()
     # ana.hot_concept_ths()

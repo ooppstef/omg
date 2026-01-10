@@ -1,5 +1,7 @@
 import adata
 import datetime
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from stocks.stock_models import StockCurrentPrice
 from stocks.industry_models import IndustryConcept
 
@@ -50,3 +52,150 @@ def hot_concept_ths(top=8, print_result=True):
         for industry_concept in industry_concepts:
             print(industry_concept)
     return industry_concepts
+
+
+def _calculate_strength_scores(excess_returns, amounts):
+    """计算强度分数：0.6×z(超额收益) + 0.4×z(成交额)，转百分位(0-100)"""
+    n = len(excess_returns)
+    if n < 2:
+        return pd.Series([50.0] * n, index=excess_returns.index)
+    
+    # z-score，方差为0时返回0
+    def safe_zscore(x):
+        std = x.std()
+        if std == 0:
+            return pd.Series([0.0] * len(x), index=x.index)
+        return (x - x.mean()) / std
+    
+    z_excess = safe_zscore(excess_returns)
+    z_amount = safe_zscore(amounts)
+    raw = 0.6 * z_excess + 0.4 * z_amount
+    
+    # 百分位排名，NaN填充50
+    scores = raw.rank(pct=True) * 100
+    return scores.fillna(50.0)
+
+
+def _get_benchmark_returns(start_date, days=10, verbose=True):
+    """获取沪深300过去N天涨幅"""
+    try:
+        df = adata.stock.market.get_market_index(index_code='000300', start_date=start_date)
+        if df is None or df.empty:
+            return {}
+        df = df.sort_values('trade_date').tail(days)
+        return dict(zip(df['trade_date'].astype(str).str[:10], df['change_pct']))
+    except Exception as e:
+        if verbose:
+            print(f"获取沪深300基准失败: {e}")
+        return {}
+
+
+def concept_strength_top10(days=10, top=10, print_result=True):
+    """
+    计算概念板块强度Top10
+    强度 = 0.6×z(超额收益) + 0.4×z(成交额)，转百分位(0-100)
+    """
+    start_date = get_recent_date(days + 15)
+    
+    # 获取概念列表和基准
+    if print_result:
+        print("获取概念列表...")
+    concept_df = adata.stock.info.all_concept_code_ths()
+    if concept_df is None or concept_df.empty:
+        if print_result:
+            print("获取概念列表失败")
+        return None
+    
+    benchmark = _get_benchmark_returns(start_date, days, print_result)
+    if not benchmark:
+        if print_result:
+            print("获取沪深300基准数据失败，无法计算超额收益")
+        return None
+    benchmark_dates = set(benchmark.keys())
+    
+    # 批量获取概念数据（多线程并发）
+    all_data = []
+    total = len(concept_df)
+    
+    def fetch_concept(row):
+        code = row.get('index_code')
+        name = row.get('name')
+        if not code or pd.isna(code):
+            return []
+        try:
+            df = adata.stock.market.get_market_concept_ths(index_code=code)
+            if df is None or df.empty:
+                return []
+            df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
+            results = []
+            for _, r in df.iterrows():
+                date = str(r['trade_date'])[:10]
+                if date not in benchmark_dates:
+                    continue
+                results.append({
+                    'code': code, 'name': name, 'date': date,
+                    'change_pct': float(r.get('change_pct', 0) or 0),
+                    'amount': float(r.get('amount', 0) or 0)
+                })
+            return results
+        except Exception as e:
+            return [('error', name, code, str(e))]
+    
+    rows = [row for _, row in concept_df.iterrows()]
+    completed = 0
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(fetch_concept, row): row for row in rows}
+        for future in as_completed(futures):
+            completed += 1
+            if print_result and (completed % 20 == 0 or completed == total):
+                print(f"获取概念数据: {completed}/{total}")
+            result = future.result()
+            if result and isinstance(result[0], tuple) and result[0][0] == 'error':
+                if print_result:
+                    _, name, code, err = result[0]
+                    print(f"获取{name}({code})失败: {err}")
+            else:
+                all_data.extend(result)
+    
+    if not all_data:
+        if print_result:
+            print("未获取到数据")
+        return None
+    
+    # 计算每天强度
+    data_df = pd.DataFrame(all_data)
+    dates = sorted(data_df['date'].unique())[-days:]
+    strength_map = {}
+    
+    for date in dates:
+        day = data_df[data_df['date'] == date].copy()
+        if day.empty:
+            continue
+        day['excess'] = day['change_pct'] - benchmark[date]
+        day = day.set_index('code')
+        scores = _calculate_strength_scores(day['excess'], day['amount'])
+        for code in scores.index:
+            if code not in strength_map:
+                strength_map[code] = {'name': day.loc[code, 'name']}
+            strength_map[code][date] = round(scores[code], 1)
+    
+    # 构建结果
+    result = []
+    for code, d in strength_map.items():
+        row = {'板块': d['name']}
+        for date in dates:
+            row[date[-5:]] = d.get(date, '-')
+        result.append(row)
+    
+    result_df = pd.DataFrame(result)
+    last_col = dates[-1][-5:] if dates else None
+    if last_col and last_col in result_df.columns:
+        result_df = result_df[result_df[last_col] != '-']
+        result_df[last_col] = pd.to_numeric(result_df[last_col], errors='coerce')
+        result_df = result_df.sort_values(last_col, ascending=False).head(top)
+    
+    if print_result and not result_df.empty:
+        print(f"\n概念板块强度 Top{top} (0-100，越高越强)")
+        print(result_df.to_string(index=False))
+    
+    return result_df
