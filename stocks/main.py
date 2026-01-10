@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import stocks.watch_list as watch_list
 import stocks.db as db
 import stocks.ana as ana
@@ -13,8 +14,10 @@ def my_list():
     ]
 
     print("=== 大盘指数 ===")
-    for code, name in indexes:
-        index_data = market.get_index_current_price(code, name)
+    # 并行获取指数数据
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        results = list(executor.map(lambda x: market.get_index_current_price(x[0], x[1]), indexes))
+    for index_data in results:
         if index_data:
             print(index_data)
 
