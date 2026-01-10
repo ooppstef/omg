@@ -12,6 +12,6 @@ setup(
             "omg=main_controller:main",
         ],
     },
-    install_requires=["requests", "adata", "pypinyin", "pandas"],
+    install_requires=["requests", "adata", "pypinyin", "pandas", "matplotlib"],
     include_package_data=True,
 )

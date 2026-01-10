@@ -55,25 +55,24 @@ def hot_concept_ths(top=8, print_result=True):
 
 
 def _calculate_strength_scores(excess_returns, amounts):
-    """计算强度分数：0.6×z(超额收益) + 0.4×z(成交额)，转百分位(0-100)"""
-    n = len(excess_returns)
-    if n < 2:
-        return pd.Series([50.0] * n, index=excess_returns.index)
+    """
+    计算绝对强度分数（可正可负）
+    公式：绝对强度 = 超额收益 × log(成交额/中位数成交额 + 1)
+    """
+    import math
+    median_amount = amounts.median()
+    if median_amount == 0:
+        median_amount = 1
     
-    # z-score，方差为0时返回0
-    def safe_zscore(x):
-        std = x.std()
-        if std == 0:
-            return pd.Series([0.0] * len(x), index=x.index)
-        return (x - x.mean()) / std
+    def calc(excess, amount):
+        ratio = amount / median_amount
+        multiplier = math.log(ratio + 1) if ratio > 0 else 0
+        return round(excess * (1 + multiplier), 2)
     
-    z_excess = safe_zscore(excess_returns)
-    z_amount = safe_zscore(amounts)
-    raw = 0.6 * z_excess + 0.4 * z_amount
-    
-    # 百分位排名，NaN填充50
-    scores = raw.rank(pct=True) * 100
-    return scores.fillna(50.0)
+    return pd.Series(
+        [calc(excess_returns[i], amounts[i]) for i in excess_returns.index],
+        index=excess_returns.index
+    )
 
 
 def _get_benchmark_returns(start_date, days=10, verbose=True):
@@ -195,7 +194,7 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
         daily_top[date] = day_scores[:top]
     
     if print_result and daily_top:
-        print(f"\n概念板块强度 Top{top} (0-100，越高越强)")
+        print(f"\n概念板块绝对强度 Top{top} (正=跑赢大盘，负=跑输大盘)")
         
         def display_width(s):
             return sum(2 if ord(c) > 127 else 1 for c in str(s))
@@ -232,3 +231,88 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
             print("-" * len(header))
     
     return daily_top
+
+
+def concept_strength_chart(concept_name, days=10):
+    """
+    绘制指定概念板块的强度曲线
+    concept_name: 板块名称（支持模糊匹配）
+    """
+    import matplotlib.pyplot as plt
+    
+    # 设置中文字体
+    plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'PingFang SC']
+    plt.rcParams['axes.unicode_minus'] = False
+    
+    start_date = get_recent_date(days + 15)
+    
+    # 查找板块
+    concept_df = adata.stock.info.all_concept_code_ths()
+    matches = concept_df[concept_df['name'].str.contains(concept_name, na=False)]
+    if matches.empty:
+        print(f"未找到包含'{concept_name}'的板块")
+        return None
+    
+    row = matches.iloc[0]
+    code, name = row['index_code'], row['name']
+    print(f"匹配到板块: {name} ({code})")
+    
+    # 获取基准和板块数据
+    benchmark = _get_benchmark_returns(start_date, days, verbose=False)
+    if not benchmark:
+        print("获取基准数据失败")
+        return None
+    
+    try:
+        df = adata.stock.market.get_market_concept_ths(index_code=code)
+        if df is None or df.empty:
+            print("获取板块数据失败")
+            return None
+    except Exception as e:
+        print(f"获取数据失败: {e}")
+        return None
+    
+    df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
+    df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+    
+    # 计算每天强度
+    dates, strengths = [], []
+    median_amount = df['amount'].median() or 1
+    
+    for _, r in df.iterrows():
+        date = str(r['trade_date'])[:10]
+        if date not in benchmark:
+            continue
+        excess = float(r.get('change_pct', 0) or 0) - benchmark[date]
+        amount = float(r.get('amount', 0) or 0)
+        import math
+        ratio = amount / median_amount
+        strength = excess * (1 + math.log(ratio + 1)) if ratio > 0 else excess
+        dates.append(date[-5:])
+        strengths.append(round(strength, 2))
+    
+    if not dates:
+        print("无有效数据")
+        return None
+    
+    # 绘图
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ['red' if s >= 0 else 'green' for s in strengths]
+    ax.bar(dates, strengths, color=colors, alpha=0.7)
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    ax.plot(dates, strengths, 'o-', color='blue', markersize=4)
+    
+    ax.set_title(f'{name} 近{len(dates)}天绝对强度')
+    ax.set_xlabel('日期')
+    ax.set_ylabel('绝对强度')
+    ax.grid(True, alpha=0.3)
+    
+    # 标注数值
+    for i, (d, s) in enumerate(zip(dates, strengths)):
+        ax.annotate(f'{s}', (i, s), textcoords="offset points", 
+                   xytext=(0, 5 if s >= 0 else -12), ha='center', fontsize=8)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return {'dates': dates, 'strengths': strengths}

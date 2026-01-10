@@ -28,4 +28,8 @@ def notice():
 
 def hot():
     ana.concept_strength_top10()
-    # ana.hot_concept_ths()
+
+
+def k(concept_name):
+    """绘制概念板块强度曲线"""
+    ana.concept_strength_chart(concept_name)
