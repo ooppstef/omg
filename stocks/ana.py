@@ -90,11 +90,26 @@ def _get_benchmark_returns(start_date, days=10, verbose=True):
         return {}
 
 
-def concept_strength_top10(days=10, top=10, print_result=True):
+# 排除列表（指数类/非行业概念）
+CONCEPT_EXCLUDE = {
+    '融资融券', '深股通', '沪股通', '标准普尔', '富时罗素', 'MSCI',
+    '同花顺中特估100', '同花顺出海50', '同花顺新质50', '同花顺果指数', '同花顺漂亮100',
+    '中国AI 50', 'ST板块', '摘帽',
+    '新股与次新股', '科创次新股', '注册制次新股',
+    '举牌', '股权转让(并购重组)',
+    '证金持股', '国家大基金持股',
+    '参股保险', '参股券商', '参股银行',
+    '高股息精选', '独角兽概念',
+}
+
+
+def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
     """
     计算概念板块强度Top10
     强度 = 0.6×z(超额收益) + 0.4×z(成交额)，转百分位(0-100)
+    exclude: 额外排除的板块名称集合
     """
+    exclude_set = CONCEPT_EXCLUDE | set(exclude or [])
     start_date = get_recent_date(days + 15)
     
     # 获取概念列表和基准
@@ -115,13 +130,14 @@ def concept_strength_top10(days=10, top=10, print_result=True):
     
     # 批量获取概念数据（多线程并发）
     all_data = []
-    total = len(concept_df)
+    # 过滤排除列表
+    rows = [row for _, row in concept_df.iterrows() 
+            if row.get('name') not in exclude_set and not pd.isna(row.get('index_code'))]
+    total = len(rows)
     
     def fetch_concept(row):
         code = row.get('index_code')
         name = row.get('name')
-        if not code or pd.isna(code):
-            return []
         try:
             df = adata.stock.market.get_market_concept_ths(index_code=code)
             if df is None or df.empty:
@@ -141,7 +157,6 @@ def concept_strength_top10(days=10, top=10, print_result=True):
         except Exception as e:
             return [('error', name, code, str(e))]
     
-    rows = [row for _, row in concept_df.iterrows()]
     completed = 0
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(fetch_concept, row): row for row in rows}
@@ -162,10 +177,10 @@ def concept_strength_top10(days=10, top=10, print_result=True):
             print("未获取到数据")
         return None
     
-    # 计算每天强度
+    # 计算每天强度并取Top10
     data_df = pd.DataFrame(all_data)
     dates = sorted(data_df['date'].unique())[-days:]
-    strength_map = {}
+    daily_top = {}  # {date: [(name, score), ...]}
     
     for date in dates:
         day = data_df[data_df['date'] == date].copy()
@@ -174,28 +189,46 @@ def concept_strength_top10(days=10, top=10, print_result=True):
         day['excess'] = day['change_pct'] - benchmark[date]
         day = day.set_index('code')
         scores = _calculate_strength_scores(day['excess'], day['amount'])
-        for code in scores.index:
-            if code not in strength_map:
-                strength_map[code] = {'name': day.loc[code, 'name']}
-            strength_map[code][date] = round(scores[code], 1)
+        # 合并名称和分数，按分数排序取Top
+        day_scores = [(day.loc[code, 'name'], round(scores[code], 1)) for code in scores.index]
+        day_scores.sort(key=lambda x: x[1], reverse=True)
+        daily_top[date] = day_scores[:top]
     
-    # 构建结果
-    result = []
-    for code, d in strength_map.items():
-        row = {'板块': d['name']}
-        for date in dates:
-            row[date[-5:]] = d.get(date, '-')
-        result.append(row)
-    
-    result_df = pd.DataFrame(result)
-    last_col = dates[-1][-5:] if dates else None
-    if last_col and last_col in result_df.columns:
-        result_df = result_df[result_df[last_col] != '-']
-        result_df[last_col] = pd.to_numeric(result_df[last_col], errors='coerce')
-        result_df = result_df.sort_values(last_col, ascending=False).head(top)
-    
-    if print_result and not result_df.empty:
+    if print_result and daily_top:
         print(f"\n概念板块强度 Top{top} (0-100，越高越强)")
-        print(result_df.to_string(index=False))
+        
+        def display_width(s):
+            return sum(2 if ord(c) > 127 else 1 for c in str(s))
+        
+        def pad_to_width(s, width):
+            s = str(s)
+            pad = width - display_width(s)
+            return s + ' ' * pad
+        
+        col_width = 16
+        # 表头
+        header = pad_to_width('排名', 6) + "|" + "|".join(pad_to_width(d[-5:], col_width) for d in dates) + "|"
+        print(header)
+        print("-" * len(header))
+        # 数据行（名称行）
+        for rank in range(top):
+            # 名称行
+            name_row = pad_to_width(str(rank + 1), 6) + "|"
+            score_row = pad_to_width('', 6) + "|"
+            for date in dates:
+                if date in daily_top and rank < len(daily_top[date]):
+                    name, score = daily_top[date][rank]
+                    if display_width(name) > col_width - 2:
+                        while display_width(name) > col_width - 4:
+                            name = name[:-1]
+                        name += '..'
+                    name_row += pad_to_width(name, col_width) + "|"
+                    score_row += pad_to_width(str(score), col_width) + "|"
+                else:
+                    name_row += pad_to_width("-", col_width) + "|"
+                    score_row += pad_to_width("", col_width) + "|"
+            print(name_row)
+            print(score_row)
+            print("-" * len(header))
     
-    return result_df
+    return daily_top
