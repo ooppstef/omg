@@ -1,6 +1,7 @@
 import adata
 import datetime
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
@@ -11,8 +12,21 @@ STRONG_MIN = 1.5
 LOOKBACK = 8
 RECENT_DAYS = 2
 WARM_DAYS = 3
-CONCEPT_WORKERS = 10
-STOCK_WORKERS = 6
+
+
+def _env_int(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+CONCEPT_WORKERS = _env_int("OMG_ROT_CONCEPT_WORKERS", 10)
+STOCK_WORKERS = _env_int("OMG_ROT_STOCK_WORKERS", 6)
 
 
 def get_recent_date(n):
@@ -280,6 +294,36 @@ def _fetch_stocks_batch(candidates, top_n):
     return loaded
 
 
+def _pick_cands(pending, top_concepts):
+    """选择需要做成分股确认的候选，兼顾硬条件和边缘候选补位。"""
+    selected = {}
+
+    for candidate in pending:
+        needs = (
+            bool(candidate["hot_row"])
+            or candidate["pr"]["gate_passed"]
+            or candidate["wr"]["score"] >= WARM_THRESH - 10
+        )
+        if needs:
+            selected[candidate["code"]] = candidate
+
+    remainder = [
+        candidate
+        for candidate in pending
+        if candidate["code"] not in selected
+        and (candidate["wr"]["score"] > 0 or candidate["pr"]["was_strong"])
+    ]
+    remainder.sort(
+        key=lambda item: max(item["wr"]["score"], item["pr"]["score"]),
+        reverse=True,
+    )
+
+    for candidate in remainder[:top_concepts]:
+        selected[candidate["code"]] = candidate
+
+    return list(selected.values())
+
+
 def _reason(group, pull_res, warm_res, feat, hot_row):
     """生成分组原因文字。"""
     parts = []
@@ -392,17 +436,14 @@ def analyze(days: int = 5, top_concepts: int = 10, top_stocks: int = 5):
         pr = pullback_score(sdf, hot_row, empty_feat)
         wr = warming_score(sdf, hot_row, empty_feat)
 
-        # 是否需要拉成分股确认
-        needs_stocks = bool(hot_row) or pr["gate_passed"] or wr["score"] >= WARM_THRESH - 10
-
         pending.append({
             "name": cd["name"], "code": cd["code"], "hot_row": hot_row,
-            "sdf": sdf, "pr": pr, "wr": wr, "needs_stocks": needs_stocks,
+            "sdf": sdf, "pr": pr, "wr": wr,
         })
 
     # 5. 并发加载成分股确认
     stock_map = _fetch_stocks_batch(
-        [p for p in pending if p["needs_stocks"]], top_n=top_stocks,
+        _pick_cands(pending, top_concepts=top_concepts), top_n=top_stocks,
     )
 
     # 6. 最终评分 + 分组
