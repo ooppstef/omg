@@ -5,3 +5,4 @@ __pycache__/*
 .serena/*
 my_list.txt
 */.serena/*
+.claude

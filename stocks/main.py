@@ -3,7 +3,7 @@ import stocks.watch_list as watch_list
 import stocks.db as db
 import stocks.ana as ana
 import stocks.market as market
-import stocks.rotation_analysis as rotation_ana
+import stocks.rot as rot_ana
 
 
 def my_list():
@@ -45,4 +45,4 @@ def k(concept_names):
 
 def rot():
     """热点板块轮动分析"""
-    rotation_ana.analyze_hot_sectors_rotation(days=5, top_concepts=10, top_stocks=5)
+    rot_ana.analyze(days=5, top_concepts=10, top_stocks=5)
