@@ -25,8 +25,8 @@ def _env_int(name, default):
     return parsed if parsed > 0 else default
 
 
-CONCEPT_WORKERS = _env_int("OMG_ROT_CONCEPT_WORKERS", 10)
-STOCK_WORKERS = _env_int("OMG_ROT_STOCK_WORKERS", 6)
+CONCEPT_WORKERS = _env_int("OMG_ROT_CONCEPT_WORKERS", 20)
+STOCK_WORKERS = _env_int("OMG_ROT_STOCK_WORKERS", 20)
 
 
 def get_recent_date(n):
@@ -269,7 +269,19 @@ def _fetch_stocks(code, top_n):
     if df is None or df.empty:
         return stock_confirm(pd.DataFrame()), []
 
-    perfs = _get_stock_perf(df["stock_code"].tolist())
+    # 只保留沪深主板/创业板/科创板，排除ST
+    valid_prefixes = ("600", "00", "300", "688")
+    codes = []
+    for c in df["stock_code"].tolist():
+        if str(c).startswith(valid_prefixes):
+            codes.append(c)
+
+    all_perfs = _get_stock_perf(codes)
+    perfs = []
+    for p in all_perfs:
+        name = str(p.get("name", "")).upper()
+        if "ST" not in name:
+            perfs.append(p)
     feat = stock_confirm(pd.DataFrame(perfs))
     perfs.sort(key=lambda x: x.get("change_pct", 0.0), reverse=True)
     return feat, perfs[:top_n]
