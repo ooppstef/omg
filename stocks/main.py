@@ -46,3 +46,47 @@ def k(concept_names):
 def rot():
     """热点板块轮动分析"""
     rot_ana.analyze(days=5, top_concepts=10, top_stocks=5)
+
+
+def _read_key():
+    """读取单个按键，支持 ESC 检测。"""
+    import sys, tty, termios
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return ch
+
+
+def filter_menu():
+    """交互式菜单"""
+    print("\n=== OMG 菜单 ===")
+    print("1. 功能1")
+    print("2. 功能2")
+    print("3. 功能3")
+    print("4. 功能4")
+    print("\n请选择 (按 ESC 退出): ", end="", flush=True)
+
+    ch = _read_key()
+    print()  # 换行
+
+    if ch == "\x1b":  # ESC
+        print("已退出")
+        return
+
+    actions = {
+        "1": lambda: print("hi1"),
+        "2": lambda: print("hi2"),
+        "3": lambda: print("hi3"),
+        "4": lambda: print("hi4"),
+    }
+
+    action = actions.get(ch)
+    if action:
+        action()
+    else:
+        print("无效选择")
