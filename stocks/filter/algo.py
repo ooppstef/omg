@@ -18,6 +18,51 @@ def _nan(val):
         return True
 
 
+CLEAR_UPTREND_RULES = {
+    "window": 20,
+    "lookback": 15,
+    "advance_min": 0.15,
+    "peak_spread_min": 0.10,
+    "closes_above_ma20_min": 5,
+    "ma10_above_ma20_min": 5,
+    "breakaway_close_ratio": 1.03,
+    "breakaway_closes_min": 4,
+    "breakout_day_change_pct": 8.0,
+    "breakout_days_min": 1,
+}
+
+TREND_PULLBACK_RULES = {
+    "close_vs_ma20_min": 0.965,
+    "ma10_vs_ma20_min": 0.995,
+    "drawdown_min": 0.03,
+    "drawdown_max": 0.18,
+    "vol_ratio_max": 1.35,
+    "distance_atr_max": 1.6,
+    "support_line_ratio": 0.985,
+    "chg_2d_min": -8.0,
+}
+
+
+def get_trend_pullback_review_context():
+    """返回当前趋势回调企稳策略的关键阈值，供验证脚本复用。"""
+    return {
+        "close_vs_ma20_min": TREND_PULLBACK_RULES["close_vs_ma20_min"],
+        "ma10_vs_ma20_min": TREND_PULLBACK_RULES["ma10_vs_ma20_min"],
+        "drawdown_min": TREND_PULLBACK_RULES["drawdown_min"],
+        "drawdown_max": TREND_PULLBACK_RULES["drawdown_max"],
+        "drawdown_range": (
+            f"{TREND_PULLBACK_RULES['drawdown_min'] * 100:.1f}%~"
+            f"{TREND_PULLBACK_RULES['drawdown_max'] * 100:.1f}%"
+        ),
+        "volume_ratio_max": TREND_PULLBACK_RULES["vol_ratio_max"],
+        "distance_atr_max": TREND_PULLBACK_RULES["distance_atr_max"],
+        "support_line_ratio": TREND_PULLBACK_RULES["support_line_ratio"],
+        "chg_2d_min": TREND_PULLBACK_RULES["chg_2d_min"],
+        "clear_uptrend": CLEAR_UPTREND_RULES.copy(),
+        "requires_signal": True,
+    }
+
+
 # ---------- 止跌形态检测 ----------
 
 
@@ -76,27 +121,107 @@ def _detect_pattern(df):
     return None
 
 
+def _detect_stabilization_signal(df):
+    """检测更宽松的企稳信号，优先返回严格形态。"""
+    strict = _detect_pattern(df)
+    if strict:
+        return strict
+
+    if len(df) < 3:
+        return None
+
+    last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+    o, h, l, c = (
+        float(last["open"]),
+        float(last["high"]),
+        float(last["low"]),
+        float(last["close"]),
+    )
+    body = abs(c - o)
+    rng = h - l
+    prev_close = float(prev["close"])
+    prev_low = float(prev["low"])
+    prev2_low = float(prev2["low"])
+    lower = min(c, o) - l
+    chg = float(last.get("change_pct", 0) or 0)
+    prev_chg = float(prev.get("change_pct", 0) or 0)
+    prev2_chg = float(prev2.get("change_pct", 0) or 0)
+
+    # 长下影修复：下影明显长于实体，且尾盘没有失控走弱。
+    if rng > 0 and body > 0 and lower >= max(body * 1.8, rng * 0.35) and chg >= -1.5:
+        return "长下影修复"
+
+    # 跌速收敛：前一日杀跌更重，当日跌幅明显收窄。
+    if prev_chg < 0 and chg >= prev_chg * 0.7 and chg > prev_chg and prev_chg <= prev2_chg:
+        return "跌速收敛"
+
+    # 低点企稳：最近不再创新低，且实体收窄。
+    if l >= min(prev_low, prev2_low) * 0.995 and body / max(c, 1.0) <= 0.015:
+        return "低点企稳"
+
+    # 小实体止跌：实体小，跌幅温和。
+    if rng > 0 and body / max(c, 1.0) <= 0.012 and chg >= -1.2:
+        return "小实体止跌"
+
+    return None
+
+
+def _has_clear_uptrend(df):
+    """判断回调前是否存在清晰上升段。"""
+    if len(df) < 25:
+        return False
+
+    window = df.iloc[-CLEAR_UPTREND_RULES["window"] :]
+    peak_idx = window["high"].idxmax()
+    peak = df.loc[peak_idx]
+
+    if _nan(peak.get("ma10")) or _nan(peak.get("ma20")):
+        return False
+
+    peak_high = float(peak["high"])
+    peak_ma20 = float(peak["ma20"])
+    if peak_ma20 <= 0:
+        return False
+
+    start_idx = max(0, peak_idx - CLEAR_UPTREND_RULES["lookback"])
+    seg = df.iloc[start_idx : peak_idx + 1]
+    rally_low = float(seg["low"].min())
+    if rally_low <= 0:
+        return False
+
+    advance = (peak_high - rally_low) / rally_low
+    peak_spread = peak_high / peak_ma20 - 1.0
+    closes_above_ma20 = (seg["close"] > seg["ma20"]).sum()
+    ma10_above_ma20 = (seg["ma10"] > seg["ma20"]).sum()
+    closes_break_away = (
+        seg["close"] >= seg["ma20"] * CLEAR_UPTREND_RULES["breakaway_close_ratio"]
+    ).sum()
+    breakout_days = (
+        seg["change_pct"] >= CLEAR_UPTREND_RULES["breakout_day_change_pct"]
+    ).sum()
+
+    return (
+        advance >= CLEAR_UPTREND_RULES["advance_min"]
+        and peak_spread >= CLEAR_UPTREND_RULES["peak_spread_min"]
+        and float(peak["ma10"]) > peak_ma20
+        and closes_above_ma20 >= CLEAR_UPTREND_RULES["closes_above_ma20_min"]
+        and ma10_above_ma20 >= CLEAR_UPTREND_RULES["ma10_above_ma20_min"]
+        and (
+            closes_break_away >= CLEAR_UPTREND_RULES["breakaway_closes_min"]
+            or breakout_days >= CLEAR_UPTREND_RULES["breakout_days_min"]
+        )
+    )
+
+
 # ---------- 策略1：趋势回调企稳 ----------
 
 
 def strategy_trend_pullback_stabilize(code, df):
-    """趋势回调企稳：筛选上升趋势中缩量回调到位、基本跌不动的股票。
+    """趋势回调企稳：平衡型候选池。
 
-    硬条件（全部满足才入选）：
-      1. close > MA20
-      2. MA10 > MA20，MA20[t] > MA20[t-5]
-      3. 近10日高点回撤 3%~8%
-      4. 近3日均量 / 前5日均量 <= 0.75
-      5. min(|close-MA10|, |close-MA20|) / ATR <= 0.8
-      6. 近3日最低 >= 前7日最低 * 0.995
-      7. 近2日累计涨跌幅 > -3.5%
-      8. 止跌形态（锤子线/双针/小阳企稳/十字星/缩量横住 任一）
-
-    软条件评分（100分满分）：
-      趋势强度 35分：DIF>0 +10, 靠近MA10 +10, 回撤4%~6% +10, MA5>MA10 +5
-      缩量质量 25分：缩量比越低越好 最高+15, 波动收敛 +10
-      止跌形态 25分：锤子25/双针22/小阳20/十字星18/横住15
-      MACD辅助 15分：DIF>DEA +8, macd_hist连续2日改善 +7
+    目标不是只保留最教科书的企稳点，而是输出：
+      - 标准企稳：趋势完整、回撤适中、缩量较好
+      - 高风险修复：趋势未坏，但回撤偏深/缩量较弱/修复属性更强
     """
     if len(df) < 30:
         return None
@@ -122,25 +247,32 @@ def strategy_trend_pullback_stabilize(code, df):
 
     # --- 硬条件 ---
 
-    # 1. close > MA20
-    if close <= ma20:
+    # 0. 回调前必须先有一段清晰上升，而不是底部反弹后横住
+    if not _has_clear_uptrend(df):
         return None
 
-    # 2. MA10 > MA20，MA20 斜率向上（5天）
-    if ma10 <= ma20:
+    # 1. close 不明显跌破 MA20
+    if close < ma20 * TREND_PULLBACK_RULES["close_vs_ma20_min"]:
+        return None
+
+    # 2. MA10 与 MA20 关系宽松些，但不能明显走坏；MA20 斜率向上（5天）
+    if ma10 < ma20 * TREND_PULLBACK_RULES["ma10_vs_ma20_min"]:
         return None
     if len(df) < 6 or _nan(df.iloc[-6].get("ma20")):
         return None
     if ma20 <= float(df.iloc[-6]["ma20"]):
         return None
 
-    # 3. 回撤 3%~8%
+    # 3. 回撤至少要像一次正常回调，过深则直接放弃
     high_10d = float(df["high"].iloc[-10:].max())
     drawdown = (high_10d - close) / high_10d
-    if not (0.03 <= drawdown <= 0.08):
+    if (
+        drawdown < TREND_PULLBACK_RULES["drawdown_min"]
+        or drawdown > TREND_PULLBACK_RULES["drawdown_max"]
+    ):
         return None
 
-    # 4. 缩量：近3日均量 / 前5日均量 <= 0.75
+    # 4. 缩量转为评分项，但极端放量不做候选
     if len(df) < 8:
         return None
     vol_3 = df["volume"].iloc[-3:].mean()
@@ -148,47 +280,65 @@ def strategy_trend_pullback_stabilize(code, df):
     if vol_5 <= 0:
         return None
     vol_ratio = float(vol_3 / vol_5)
-    if vol_ratio > 0.75:
+    if vol_ratio > TREND_PULLBACK_RULES["vol_ratio_max"]:
         return None
 
-    # 5. 价格位置
+    # 5. 价格位置：远离均线太多只适合追涨，不是回调企稳
     d10 = abs(close - ma10) / atr_val
     d20 = abs(close - ma20) / atr_val
-    if min(d10, d20) > 0.8:
+    distance = min(d10, d20)
+    if distance > TREND_PULLBACK_RULES["distance_atr_max"]:
         return None
 
-    # 6. 不破位
+    # 6. 不破位：允许稍深测试，但不能明显跌穿前低
     ref_low = float(
         df["low"].iloc[-10:-3].min() if len(df) >= 10 else df["low"].iloc[:-3].min()
     )
-    if float(df["low"].iloc[-3:].min()) < ref_low * 0.995:
+    recent_low = float(df["low"].iloc[-3:].min())
+    support_line = ref_low * TREND_PULLBACK_RULES["support_line_ratio"]
+    if recent_low < support_line and close < support_line:
         return None
 
-    # 7. 近2日累计涨跌幅 > -3.5%
+    # 7. 近2日累计涨跌幅：急跌后尚未收敛时不保留
     chg_2d = float(last["change_pct"]) + float(prev["change_pct"])
-    if chg_2d < -3.5:
+    if chg_2d < TREND_PULLBACK_RULES["chg_2d_min"]:
         return None
 
-    # 8. 止跌形态
-    pattern = _detect_pattern(df)
-    if pattern is None:
+    # 8. 至少出现一个企稳迹象
+    signal = _detect_stabilization_signal(df)
+    if signal is None:
         return None
 
     # --- 评分 ---
     score = 0.0
+    risk_flags = []
 
-    # 趋势强度 (35)
+    # 趋势强度 (30)
     if dif > 0:
         score += 10
-    if d10 < d20:
+    if d10 <= d20:
         score += 10
-    if 0.04 <= drawdown <= 0.06:
+    if 0.03 <= drawdown <= 0.10:
         score += 10
+    elif drawdown <= 0.14:
+        score += 5
+        risk_flags.append("回撤偏深")
+    else:
+        score += 2
+        risk_flags.append("回撤偏深")
     if ma5 > ma10:
         score += 5
 
-    # 缩量质量 (25)
-    score += max(0, min(15, (0.75 - vol_ratio) / 0.40 * 15))
+    # 缩量质量 (20)
+    if vol_ratio <= 0.75:
+        score += 15
+    elif vol_ratio <= 0.95:
+        score += 9
+    elif vol_ratio <= 1.10:
+        score += 4
+        risk_flags.append("缩量一般")
+    else:
+        risk_flags.append("缩量不足")
     if len(df) >= 5:
         # 波动收敛：amplitude 下降或 ATR 下降，任一即可
         vol_converge = False
@@ -203,18 +353,42 @@ def strategy_trend_pullback_stabilize(code, df):
         if atr_val < atr_old:
             vol_converge = True
         if vol_converge:
-            score += 10
+            score += 5
 
-    # 形态 (25)
+    # 价格位置 (15)
+    if distance <= 0.8:
+        score += 15
+    elif distance <= 1.2:
+        score += 8
+        risk_flags.append("偏离均线略远")
+    else:
+        score += 2
+        risk_flags.append("偏离均线较远")
+
+    # 近两日伤害 (10)
+    if chg_2d > -3.5:
+        score += 10
+    else:
+        score += 4
+        risk_flags.append("急跌修复")
+
+    if close < ma20:
+        risk_flags.append("回踩MA20下方")
+
+    # 形态 / 企稳迹象 (25)
     score += {
         "锤子线": 25,
         "双针探底": 22,
         "小阳企稳": 20,
         "十字星": 18,
         "缩量横住": 15,
-    }.get(pattern, 15)
+        "长下影修复": 18,
+        "跌速收敛": 15,
+        "低点企稳": 14,
+        "小实体止跌": 12,
+    }.get(signal, 12)
 
-    # MACD (15)
+    # MACD (10)
     if dif > dea:
         score += 8
     if len(df) >= 3:
@@ -224,12 +398,23 @@ def strategy_trend_pullback_stabilize(code, df):
             float(last["macd_hist"]),
         ]
         if mh[2] > mh[1] > mh[0]:
-            score += 7
+            score += 2
+
+    # 候选类型
+    candidate_type = "标准企稳"
+    high_risk_markers = {"回撤偏深", "缩量一般", "缩量不足", "偏离均线较远", "急跌修复", "回踩MA20下方"}
+    if any(flag in high_risk_markers for flag in risk_flags):
+        candidate_type = "高风险修复"
+
+    risk_text = "无明显风险" if not risk_flags else "，".join(dict.fromkeys(risk_flags))
 
     return {
         "code": code,
         "name": "",
-        "形态": pattern,
+        "形态": signal,
+        "候选类型": candidate_type,
+        "风险说明": risk_text,
+        "触发说明": signal,
         "总分": round(score, 1),
         "close": round(close, 2),
         "MA10": round(ma10, 2),

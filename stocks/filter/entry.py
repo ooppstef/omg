@@ -78,7 +78,11 @@ def _print_results(hits):
         stock_name = h.get("name", "")
         pattern = h.get("形态", "")
         score = h.get("总分", 0)
-        print(f"  {i:>2}. {code} {stock_name:<8s} [{pattern}] 总分:{score}")
+        candidate_type = h.get("候选类型", "")
+        lead = f"[{pattern}]"
+        if candidate_type:
+            lead = f"[{candidate_type}/{pattern}]"
+        print(f"  {i:>2}. {code} {stock_name:<8s} {lead} 总分:{score}")
 
         # 第二行：关键指标
         parts = []
@@ -94,3 +98,11 @@ def _print_results(hits):
                 macd_parts.append(f"{col}:{h[col]}")
         if macd_parts:
             print(f"      {' | '.join(macd_parts)}")
+
+        # 第四行：风险与触发说明
+        explain_parts = []
+        for col in ["风险说明", "触发说明"]:
+            if h.get(col):
+                explain_parts.append(f"{col}:{h[col]}")
+        if explain_parts:
+            print(f"      {' | '.join(explain_parts)}")
