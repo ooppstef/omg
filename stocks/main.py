@@ -4,6 +4,8 @@ import stocks.db as db
 import stocks.ana as ana
 import stocks.market as market
 import stocks.rot as rot_ana
+import stocks.filter.entry as stock_filter
+from stocks.filter.algo import STRATEGIES
 
 
 def my_list():
@@ -63,30 +65,20 @@ def _read_key():
 
 
 def filter_menu():
-    """交互式菜单"""
-    print("\n=== OMG 菜单 ===")
-    print("1. 功能1")
-    print("2. 功能2")
-    print("3. 功能3")
-    print("4. 功能4")
+    """交互式筛选菜单"""
+    print("\n=== OMG 筛选 ===")
+    for key, (name, _) in STRATEGIES.items():
+        print(f"{key}. {name}")
     print("\n请选择 (按 ESC 退出): ", end="", flush=True)
 
     ch = _read_key()
-    print()  # 换行
+    print()
 
-    if ch == "\x1b":  # ESC
+    if ch == "\x1b":
         print("已退出")
         return
 
-    actions = {
-        "1": lambda: print("hi1"),
-        "2": lambda: print("hi2"),
-        "3": lambda: print("hi3"),
-        "4": lambda: print("hi4"),
-    }
-
-    action = actions.get(ch)
-    if action:
-        action()
+    if ch in STRATEGIES:
+        stock_filter.run_strategy(ch)
     else:
         print("无效选择")
