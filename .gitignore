@@ -6,3 +6,4 @@ __pycache__/*
 my_list.txt
 */.serena/*
 .claude
+stocks/filter/__pycache__
