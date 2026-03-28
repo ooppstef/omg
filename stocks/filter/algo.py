@@ -50,7 +50,7 @@ TREND_PULLBACK_RULES = {
 }
 
 
-def get_trend_pullback_review_context():
+def trend_pullback_ctx():
     """返回当前趋势回调企稳策略的关键阈值，供验证脚本复用。"""
     return {
         "adx_min": TREND_PULLBACK_RULES["adx_min"],
@@ -131,7 +131,7 @@ def _detect_pattern(df):
     return None
 
 
-def _detect_stabilization_signal(df):
+def _pick_signal(df):
     """检测更宽松的企稳信号，优先返回严格形态。"""
     strict = _detect_pattern(df)
     if strict:
@@ -232,7 +232,7 @@ def _has_clear_uptrend(df):
     )
 
 
-def _evaluate_trend_state(df):
+def _trend_state(df):
     """评估趋势背景。"""
     state = {"ok": False, "score": 0.0, "notes": [], "risks": []}
     need = ("ma20", "ma60", "adx", "plus_di", "minus_di", "ppo", "dif")
@@ -316,7 +316,7 @@ def _is_distribution_day(row):
     )
 
 
-def _evaluate_pullback_state(df):
+def _pullback_state(df):
     """评估回调质量。"""
     state = {
         "ok": False,
@@ -428,7 +428,7 @@ def _evaluate_pullback_state(df):
     return state
 
 
-def _evaluate_trigger_state(df, signal):
+def _trigger_state(df, signal):
     """评估触发质量。"""
     state = {"ok": False, "score": 0.0, "notes": [], "risks": []}
     if signal is None:
@@ -528,7 +528,6 @@ def _evaluate_trigger_state(df, signal):
     full_trigger_ok = reclaim_ok and volume_ok and close_loc_ok and ppo_repair_ok and adosc_ok
     repair_ok = (
         early_reclaim_ok
-        and rv20 >= TREND_PULLBACK_RULES["rv20_repair_min"]
         and close_loc_repair_ok
         and (ppo_repair_soft or adosc_ok or obv_rising)
     )
@@ -539,7 +538,7 @@ def _evaluate_trigger_state(df, signal):
 # ---------- 策略1：趋势回调企稳 ----------
 
 
-def strategy_trend_pullback_stabilize(code, df):
+def trend_pullback(code, df):
     """趋势回调企稳：Trend / Pullback / Trigger 状态机。"""
     if len(df) < 60:
         return None
@@ -590,33 +589,31 @@ def strategy_trend_pullback_stabilize(code, df):
     if (recent_15 >= 9.5).sum() >= 2:
         return None
 
-    signal = _detect_stabilization_signal(df)
-    trend_state = _evaluate_trend_state(df)
-    if not trend_state["ok"]:
+    signal = _pick_signal(df)
+    trend = _trend_state(df)
+    if not trend["ok"]:
         return None
-    pullback_state = _evaluate_pullback_state(df)
-    if not pullback_state["ok"]:
+    pullback = _pullback_state(df)
+    if not pullback["ok"]:
         return None
-    trigger_state = _evaluate_trigger_state(df, signal)
-    if not trigger_state["ok"]:
+    trigger = _trigger_state(df, signal)
+    if not trigger["ok"]:
         return None
 
-    trend_score = trend_state["score"]
-    pullback_score = pullback_state["score"]
-    trigger_score = trigger_state["score"]
+    trend_score = trend["score"]
+    pullback_score = pullback["score"]
+    trigger_score = trigger["score"]
     score = trend_score + pullback_score + trigger_score
 
-    risk_flags = list(
-        dict.fromkeys(trend_state["risks"] + pullback_state["risks"] + trigger_state["risks"])
-    )
-    candidate_type = "标准企稳" if not risk_flags else "高风险修复"
-    risk_text = "无明显风险" if not risk_flags else "，".join(risk_flags)
+    risks = list(dict.fromkeys(trend["risks"] + pullback["risks"] + trigger["risks"]))
+    cand_type = "标准企稳" if not risks else "高风险修复"
+    risk_text = "无明显风险" if not risks else "，".join(risks)
 
     return {
         "code": code,
         "name": "",
         "形态": signal,
-        "候选类型": candidate_type,
+        "候选类型": cand_type,
         "风险说明": risk_text,
         "触发说明": f"{signal} / Trend:{int(trend_score)} Pullback:{int(pullback_score)} Trigger:{int(trigger_score)}",
         "总分": round(score, 1),
@@ -626,8 +623,8 @@ def strategy_trend_pullback_stabilize(code, df):
         "close": round(close, 2),
         "MA10": round(ma10, 2),
         "MA20": round(ma20, 2),
-        "回撤": f"{pullback_state['drawdown'] * 100:.1f}%",
-        "缩量比": f"{pullback_state['dryup_ratio']:.2f}",
+        "回撤": f"{pullback['drawdown'] * 100:.1f}%",
+        "缩量比": f"{pullback['dryup_ratio']:.2f}",
         "DIF": round(dif, 3),
         "DEA": round(dea, 3),
         "MACD": round(macd_h, 3),
@@ -644,8 +641,17 @@ def _placeholder(code, df):
 
 # 策略注册表：菜单序号 -> (名称, 函数)
 STRATEGIES = {
-    "1": ("趋势回调企稳", strategy_trend_pullback_stabilize),
+    "1": ("趋势回调企稳", trend_pullback),
     "2": ("策略2", _placeholder),
     "3": ("策略3", _placeholder),
     "4": ("策略4", _placeholder),
 }
+
+
+# 兼容旧名字，避免外部脚本断掉
+get_trend_pullback_review_context = trend_pullback_ctx
+_detect_stabilization_signal = _pick_signal
+_evaluate_trend_state = _trend_state
+_evaluate_pullback_state = _pullback_state
+_evaluate_trigger_state = _trigger_state
+strategy_trend_pullback_stabilize = trend_pullback
