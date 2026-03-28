@@ -2,7 +2,7 @@
 
 策略函数签名：func(code, df) -> dict | None
   code: 股票代码
-  df: 已算好指标的 DataFrame（含 ma5/ma10/ma20/dif/dea/macd_hist/atr/amplitude/rel_vol）
+  df: 已算好指标的 DataFrame
   返回 dict 表示命中，None 表示未命中
 """
 
@@ -35,38 +35,40 @@ CLEAR_UPTREND_RULES = {
 }
 
 TREND_PULLBACK_RULES = {
-    "close_vs_ma20_min": 0.965,
-    "ma10_vs_ma20_min": 0.995,
-    "drawdown_min": 0.03,
-    "drawdown_max": 0.15,
-    "vol_ratio_max": 1.35,
-    "distance_atr_max": 1.6,
-    "support_line_ratio": 0.985,
-    "chg_2d_min": -8.0,
+    "adx_min": 20.0,
+    "days_since_peak_min": 3,
+    "days_since_peak_max": 10,
+    "drawdown_atr_min": 1.2,
+    "drawdown_atr_max": 4.8,
+    "dryup_ratio_max": 0.85,
+    "distribution_days_max": 1,
+    "close_vs_ma20_min": 0.96,
+    "close_vs_ma20_floor": 0.94,
+    "rv20_repair_min": 0.70,
+    "rv20_trigger_min": 1.0,
+    "close_loc_trigger_min": 0.60,
 }
 
 
 def get_trend_pullback_review_context():
     """返回当前趋势回调企稳策略的关键阈值，供验证脚本复用。"""
     return {
+        "adx_min": TREND_PULLBACK_RULES["adx_min"],
+        "days_since_peak_min": TREND_PULLBACK_RULES["days_since_peak_min"],
+        "days_since_peak_max": TREND_PULLBACK_RULES["days_since_peak_max"],
+        "drawdown_atr_min": TREND_PULLBACK_RULES["drawdown_atr_min"],
+        "drawdown_atr_max": TREND_PULLBACK_RULES["drawdown_atr_max"],
+        "dryup_ratio_max": TREND_PULLBACK_RULES["dryup_ratio_max"],
+        "distribution_days_max": TREND_PULLBACK_RULES["distribution_days_max"],
         "close_vs_ma20_min": TREND_PULLBACK_RULES["close_vs_ma20_min"],
-        "ma10_vs_ma20_min": TREND_PULLBACK_RULES["ma10_vs_ma20_min"],
-        "drawdown_min": TREND_PULLBACK_RULES["drawdown_min"],
-        "drawdown_max": TREND_PULLBACK_RULES["drawdown_max"],
-        "drawdown_range": (
-            f"{TREND_PULLBACK_RULES['drawdown_min'] * 100:.1f}%~"
-            f"{TREND_PULLBACK_RULES['drawdown_max'] * 100:.1f}%"
-        ),
-        "volume_ratio_max": TREND_PULLBACK_RULES["vol_ratio_max"],
-        "distance_atr_max": TREND_PULLBACK_RULES["distance_atr_max"],
-        "support_line_ratio": TREND_PULLBACK_RULES["support_line_ratio"],
-        "chg_2d_min": TREND_PULLBACK_RULES["chg_2d_min"],
+        "close_vs_ma20_floor": TREND_PULLBACK_RULES["close_vs_ma20_floor"],
+        "rv20_repair_min": TREND_PULLBACK_RULES["rv20_repair_min"],
+        "rv20_trigger_min": TREND_PULLBACK_RULES["rv20_trigger_min"],
+        "close_loc_trigger_min": TREND_PULLBACK_RULES["close_loc_trigger_min"],
         "clear_uptrend": CLEAR_UPTREND_RULES.copy(),
-        "requires_signal": True,
+        "state_machine": ("trend", "pullback", "trigger"),
         "min_price": 5.0,
         "meme_limit_up_max": 2,
-        "min_days_since_peak": 3,
-        "v_recovery_3d_max": 8.0,
     }
 
 
@@ -230,25 +232,342 @@ def _has_clear_uptrend(df):
     )
 
 
+def _evaluate_trend_state(df):
+    """评估趋势背景。"""
+    state = {"ok": False, "score": 0.0, "notes": [], "risks": []}
+    need = ("ma20", "ma60", "adx", "plus_di", "minus_di", "ppo", "dif")
+    if len(df) < 6:
+        state["notes"].append("趋势样本不足")
+        return state
+    for col in need:
+        if col not in df.columns or _nan(df.iloc[-1].get(col)):
+            state["notes"].append(f"缺少趋势列:{col}")
+            return state
+
+    last = df.iloc[-1]
+    ma20 = float(last["ma20"])
+    ma60 = float(last["ma60"])
+    adx = float(last["adx"])
+    plus_di = float(last["plus_di"])
+    minus_di = float(last["minus_di"])
+    ppo = float(last["ppo"])
+    dif = float(last["dif"])
+
+    ma20_old = None
+    if len(df) >= 6 and not _nan(df.iloc[-6].get("ma20")):
+        ma20_old = float(df.iloc[-6]["ma20"])
+
+    ma_alignment_ok = ma20 > ma60
+    ma_slope_ok = ma20_old is not None and ma20 > ma20_old
+    adx_ok = adx >= TREND_PULLBACK_RULES["adx_min"]
+    di_ok = plus_di > minus_di
+    momentum_ok = ppo > 0 or dif > 0
+
+    if ma_alignment_ok:
+        state["score"] += 10
+    else:
+        state["notes"].append("MA20 未站上 MA60")
+
+    if ma_slope_ok:
+        state["score"] += 8
+    else:
+        state["notes"].append("MA20 斜率不足")
+
+    if adx_ok:
+        state["score"] += 8
+    elif adx >= TREND_PULLBACK_RULES["adx_min"] - 2:
+        state["score"] += 4
+        state["risks"].append("ADX偏弱")
+    else:
+        state["notes"].append("ADX不足")
+
+    if di_ok:
+        state["score"] += 6
+    else:
+        state["notes"].append("+DI 未压制 -DI")
+
+    if momentum_ok:
+        state["score"] += 8
+    else:
+        state["notes"].append("PPO / DIF 仍偏弱")
+
+    rally_ready = True
+    if {"high", "low", "close", "change_pct"}.issubset(df.columns) and len(df) >= 25:
+        rally_ready = _has_clear_uptrend(df)
+        if rally_ready:
+            state["score"] += 10
+        else:
+            state["notes"].append("回调前上升段不够清晰")
+
+    state["ok"] = (
+        ma_alignment_ok and ma_slope_ok and adx_ok and di_ok and momentum_ok and rally_ready
+    )
+    return state
+
+
+def _is_distribution_day(row):
+    """识别放量阴线派发。"""
+    if _nan(row.get("rv20")) or _nan(row.get("close_loc")) or _nan(row.get("change_pct")):
+        return False
+    return (
+        float(row["rv20"]) > 1.8
+        and float(row["close_loc"]) < 0.25
+        and float(row["change_pct"]) < 0
+    )
+
+
+def _evaluate_pullback_state(df):
+    """评估回调质量。"""
+    state = {
+        "ok": False,
+        "score": 0.0,
+        "notes": [],
+        "risks": [],
+        "dryup_ratio": float("nan"),
+        "distribution_cluster": False,
+        "drawdown": float("nan"),
+        "drawdown_atr": float("nan"),
+        "days_since_peak": 0,
+    }
+    need = ("high", "low", "close", "volume", "ma20", "atr", "change_pct", "rv20", "close_loc")
+    for col in need:
+        if col not in df.columns or _nan(df.iloc[-1].get(col)):
+            state["notes"].append(f"缺少回调列:{col}")
+            return state
+
+    window = df.iloc[-20:] if len(df) >= 20 else df
+    peak_idx = window["high"].idxmax()
+    last = df.iloc[-1]
+    close = float(last["close"])
+    peak_high = float(df.loc[peak_idx, "high"])
+    atr_val = float(last["atr"])
+    ma20 = float(last["ma20"])
+    if atr_val <= 0 or peak_high <= 0 or ma20 <= 0:
+        state["notes"].append("回调基础数据异常")
+        return state
+
+    days_since_peak = len(df) - 1 - peak_idx
+    state["days_since_peak"] = days_since_peak
+    drawdown = (peak_high - close) / peak_high
+    drawdown_atr = (peak_high - close) / atr_val
+    state["drawdown"] = drawdown
+    state["drawdown_atr"] = drawdown_atr
+
+    up_leg = df.iloc[max(0, peak_idx - 10) : peak_idx + 1]
+    pullback = df.iloc[peak_idx + 1 :]
+    if pullback.empty:
+        state["notes"].append("尚未形成回调段")
+        return state
+
+    up_days = up_leg[up_leg["change_pct"] > 0]
+    down_days = pullback[pullback["change_pct"] < 0]
+    if not up_days.empty and not down_days.empty and float(up_days["volume"].mean()) > 0:
+        dryup_ratio = float(down_days["volume"].mean() / up_days["volume"].mean())
+    else:
+        dryup_ratio = 1.0
+    state["dryup_ratio"] = dryup_ratio
+
+    distribution_days = sum(_is_distribution_day(row) for _, row in pullback.iterrows())
+    state["distribution_cluster"] = distribution_days > TREND_PULLBACK_RULES["distribution_days_max"]
+
+    days_ok = (
+        TREND_PULLBACK_RULES["days_since_peak_min"]
+        <= days_since_peak
+        <= TREND_PULLBACK_RULES["days_since_peak_max"]
+    )
+    drawdown_ok = (
+        TREND_PULLBACK_RULES["drawdown_atr_min"]
+        <= drawdown_atr
+        <= TREND_PULLBACK_RULES["drawdown_atr_max"]
+    )
+    close_vs_ma20 = close / ma20
+    close_ok = close_vs_ma20 >= TREND_PULLBACK_RULES["close_vs_ma20_floor"]
+
+    if days_ok:
+        state["score"] += 8
+    else:
+        state["notes"].append("回调时长不在目标区间")
+
+    if drawdown_ok:
+        state["score"] += 12
+    elif drawdown_atr <= TREND_PULLBACK_RULES["drawdown_atr_max"] + 0.8:
+        state["score"] += 6
+        state["risks"].append("回调偏深")
+    else:
+        state["notes"].append("回撤超出可接受范围")
+
+    if dryup_ratio <= TREND_PULLBACK_RULES["dryup_ratio_max"]:
+        state["score"] += 10
+    elif dryup_ratio <= 1.0:
+        state["score"] += 5
+        state["risks"].append("缩量一般")
+    else:
+        state["notes"].append("缩量不足")
+
+    if close_vs_ma20 >= TREND_PULLBACK_RULES["close_vs_ma20_min"]:
+        state["score"] += 8
+    elif close_ok:
+        state["score"] += 4
+        state["risks"].append("回踩MA20偏深")
+    else:
+        state["notes"].append("已明显跌破 MA20")
+
+    if not state["distribution_cluster"]:
+        state["score"] += 8
+    else:
+        state["notes"].append("回调中出现派发簇")
+
+    if "obv" in df.columns and not _nan(last.get("obv")):
+        obv_ref = pullback["obv"].iloc[:-1] if len(pullback) > 1 else pullback["obv"]
+        if not obv_ref.empty and float(last["obv"]) >= float(obv_ref.min()):
+            state["score"] += 4
+        else:
+            state["risks"].append("OBV修复偏弱")
+
+    state["ok"] = days_ok and drawdown_ok and close_ok and dryup_ratio <= 1.0 and not state["distribution_cluster"]
+    return state
+
+
+def _evaluate_trigger_state(df, signal):
+    """评估触发质量。"""
+    state = {"ok": False, "score": 0.0, "notes": [], "risks": []}
+    if signal is None:
+        state["notes"].append("缺少企稳信号")
+        return state
+
+    need = ("close", "ma5", "high", "rv20", "close_loc", "ppo_hist", "ppo", "ppo_signal", "adosc")
+    if len(df) < 3:
+        state["notes"].append("触发样本不足")
+        return state
+    for col in need:
+        if col not in df.columns or _nan(df.iloc[-1].get(col)):
+            state["notes"].append(f"缺少触发列:{col}")
+            return state
+
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    last = df.iloc[-1]
+    close = float(last["close"])
+    ma5 = float(last["ma5"])
+    rv20 = float(last["rv20"])
+    close_loc = float(last["close_loc"])
+
+    reclaim_ok = close >= ma5 and close >= float(prev["high"]) * 0.995
+    early_reclaim_ok = close >= ma5 * 0.99
+    volume_ok = rv20 >= TREND_PULLBACK_RULES["rv20_trigger_min"]
+    close_loc_ok = close_loc >= TREND_PULLBACK_RULES["close_loc_trigger_min"]
+    close_loc_repair_ok = close_loc >= 0.70
+
+    ppo_hist = [float(prev2["ppo_hist"]), float(prev["ppo_hist"]), float(last["ppo_hist"])]
+    gap_prev = float(prev["ppo_signal"]) - float(prev["ppo"])
+    gap_last = float(last["ppo_signal"]) - float(last["ppo"])
+    ppo_repair_ok = ppo_hist[2] > ppo_hist[1] > ppo_hist[0] and gap_last < gap_prev
+    ppo_repair_soft = ppo_hist[2] > ppo_hist[1] or gap_last < gap_prev
+
+    adosc_ok = float(last["adosc"]) > float(prev["adosc"])
+    obv_rising = False
+    if "obv" in df.columns and not _nan(last.get("obv")) and not _nan(prev.get("obv")):
+        obv_rising = float(last["obv"]) > float(prev["obv"])
+
+    state["score"] += {
+        "锤子线": 12,
+        "双针探底": 11,
+        "小阳企稳": 10,
+        "十字星": 9,
+        "缩量横住": 8,
+        "长下影修复": 9,
+        "跌速收敛": 8,
+        "低点企稳": 8,
+        "小实体止跌": 7,
+    }.get(signal, 7)
+
+    if reclaim_ok:
+        state["score"] += 10
+    elif early_reclaim_ok:
+        state["score"] += 5
+        state["risks"].append("尚未完成突破")
+    else:
+        state["notes"].append("价格未有效收复")
+
+    if rv20 >= TREND_PULLBACK_RULES["rv20_trigger_min"] + 0.2:
+        state["score"] += 10
+    elif volume_ok:
+        state["score"] += 8
+    elif rv20 >= TREND_PULLBACK_RULES["rv20_repair_min"]:
+        state["score"] += 4
+        state["risks"].append("触发量能不足")
+    else:
+        state["notes"].append("触发量能不足")
+
+    if close_loc >= 0.75:
+        state["score"] += 10
+    elif close_loc_ok:
+        state["score"] += 8
+    elif close_loc_repair_ok:
+        state["score"] += 4
+        state["risks"].append("收盘位置一般")
+    else:
+        state["notes"].append("收盘位置偏弱")
+
+    if ppo_repair_ok:
+        state["score"] += 12
+    elif ppo_repair_soft:
+        state["score"] += 5
+        state["risks"].append("PPO修复一般")
+    else:
+        state["notes"].append("PPO修复不足")
+
+    if adosc_ok:
+        state["score"] += 8
+    elif obv_rising:
+        state["score"] += 4
+        state["risks"].append("资金流确认一般")
+    else:
+        state["notes"].append("资金流确认不足")
+
+    full_trigger_ok = reclaim_ok and volume_ok and close_loc_ok and ppo_repair_ok and adosc_ok
+    repair_ok = (
+        early_reclaim_ok
+        and rv20 >= TREND_PULLBACK_RULES["rv20_repair_min"]
+        and close_loc_repair_ok
+        and (ppo_repair_soft or adosc_ok or obv_rising)
+    )
+    state["ok"] = signal is not None and (full_trigger_ok or repair_ok)
+    return state
+
+
 # ---------- 策略1：趋势回调企稳 ----------
 
 
 def strategy_trend_pullback_stabilize(code, df):
-    """趋势回调企稳：平衡型候选池。
-
-    目标不是只保留最教科书的企稳点，而是输出：
-      - 标准企稳：趋势完整、回撤适中、缩量较好
-      - 高风险修复：趋势未坏，但回撤偏深/缩量较弱/修复属性更强
-    """
-    if len(df) < 30:
+    """趋势回调企稳：Trend / Pullback / Trigger 状态机。"""
+    if len(df) < 60:
         return None
 
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev2 = df.iloc[-3] if len(df) >= 3 else prev
 
     # 必要列检查
-    need = ("ma5", "ma10", "ma20", "close", "volume", "atr", "dif", "dea", "macd_hist")
+    need = (
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma60",
+        "close",
+        "volume",
+        "atr",
+        "dif",
+        "dea",
+        "macd_hist",
+        "adx",
+        "plus_di",
+        "minus_di",
+        "ppo",
+        "ppo_signal",
+        "ppo_hist",
+        "rv20",
+        "close_loc",
+        "adosc",
+    )
     for col in need:
         if col not in df.columns or _nan(last.get(col)):
             return None
@@ -262,191 +581,36 @@ def strategy_trend_pullback_stabilize(code, df):
     if atr_val <= 0 or float(last["volume"]) <= 0:
         return None
 
-    # --- 硬条件 ---
-
-    # 0a. 最低股价过滤
+    # 最低股价过滤
     if close < 5.0:
         return None
 
-    # 0b. 妖股过滤：近15日内不能有 ≥2 个涨停板
+    # 妖股过滤：近15日内不能有 ≥2 个涨停板
     recent_15 = df["change_pct"].iloc[-15:]
     if (recent_15 >= 9.5).sum() >= 2:
         return None
 
-    # 0c. 从高点回调至少 3 个交易日（排除刚见顶就判定企稳）
-    high_idx = df["high"].iloc[-20:].idxmax()
-    days_since_peak = len(df) - 1 - high_idx
-    if days_since_peak < 3:
-        return None
-
-    # 0d. 排除已经 V 型反弹完的：近5日累计涨幅不超过 8%，且从近期低点反弹不超过 5%
-    chg_5d = df["change_pct"].iloc[-5:].sum()
-    if chg_5d > 8.0:
-        return None
-    recent_low = float(df["low"].iloc[-7:].min())
-    if recent_low > 0 and (close - recent_low) / recent_low > 0.05:
-        return None
-
-    # 0e. 回调前必须先有一段清晰上升，而不是底部反弹后横住
-    if not _has_clear_uptrend(df):
-        return None
-
-    # 1. close 不明显跌破 MA20
-    if close < ma20 * TREND_PULLBACK_RULES["close_vs_ma20_min"]:
-        return None
-
-    # 2. MA10 与 MA20 关系宽松些，但不能明显走坏；MA20 斜率向上（5天）
-    if ma10 < ma20 * TREND_PULLBACK_RULES["ma10_vs_ma20_min"]:
-        return None
-    if len(df) < 6 or _nan(df.iloc[-6].get("ma20")):
-        return None
-    if ma20 <= float(df.iloc[-6]["ma20"]):
-        return None
-
-    # 3. 回撤至少要像一次正常回调，过深则直接放弃
-    high_10d = float(df["high"].iloc[-10:].max())
-    drawdown = (high_10d - close) / high_10d
-    if (
-        drawdown < TREND_PULLBACK_RULES["drawdown_min"]
-        or drawdown > TREND_PULLBACK_RULES["drawdown_max"]
-    ):
-        return None
-
-    # 4. 缩量转为评分项，但极端放量不做候选
-    if len(df) < 8:
-        return None
-    vol_3 = df["volume"].iloc[-3:].mean()
-    vol_5 = df["volume"].iloc[-8:-3].mean()
-    if vol_5 <= 0:
-        return None
-    vol_ratio = float(vol_3 / vol_5)
-    if vol_ratio > TREND_PULLBACK_RULES["vol_ratio_max"]:
-        return None
-
-    # 5. 价格位置：远离均线太多只适合追涨，不是回调企稳
-    d10 = abs(close - ma10) / atr_val
-    d20 = abs(close - ma20) / atr_val
-    distance = min(d10, d20)
-    if distance > TREND_PULLBACK_RULES["distance_atr_max"]:
-        return None
-
-    # 6. 不破位：允许稍深测试，但不能明显跌穿前低
-    ref_low = float(
-        df["low"].iloc[-10:-3].min() if len(df) >= 10 else df["low"].iloc[:-3].min()
-    )
-    recent_low = float(df["low"].iloc[-3:].min())
-    support_line = ref_low * TREND_PULLBACK_RULES["support_line_ratio"]
-    if recent_low < support_line and close < support_line:
-        return None
-
-    # 7. 近2日累计涨跌幅：急跌后尚未收敛时不保留
-    chg_2d = float(last["change_pct"]) + float(prev["change_pct"])
-    if chg_2d < TREND_PULLBACK_RULES["chg_2d_min"]:
-        return None
-
-    # 8. 至少出现一个企稳迹象
     signal = _detect_stabilization_signal(df)
-    if signal is None:
+    trend_state = _evaluate_trend_state(df)
+    if not trend_state["ok"]:
+        return None
+    pullback_state = _evaluate_pullback_state(df)
+    if not pullback_state["ok"]:
+        return None
+    trigger_state = _evaluate_trigger_state(df, signal)
+    if not trigger_state["ok"]:
         return None
 
-    # --- 评分 ---
-    score = 0.0
-    risk_flags = []
+    trend_score = trend_state["score"]
+    pullback_score = pullback_state["score"]
+    trigger_score = trigger_state["score"]
+    score = trend_score + pullback_score + trigger_score
 
-    # 趋势强度 (30)
-    if dif > 0:
-        score += 10
-    if d10 <= d20:
-        score += 10
-    if 0.03 <= drawdown <= 0.10:
-        score += 10
-    elif drawdown <= 0.14:
-        score += 5
-        risk_flags.append("回撤偏深")
-    else:
-        score += 2
-        risk_flags.append("回撤偏深")
-    if ma5 > ma10:
-        score += 5
-
-    # 缩量质量 (20)
-    if vol_ratio <= 0.75:
-        score += 15
-    elif vol_ratio <= 0.95:
-        score += 9
-    elif vol_ratio <= 1.10:
-        score += 4
-        risk_flags.append("缩量一般")
-    else:
-        risk_flags.append("缩量不足")
-    if len(df) >= 5:
-        # 波动收敛：amplitude 下降或 ATR 下降，任一即可
-        vol_converge = False
-        if "amplitude" in df.columns:
-            amp_new = df["amplitude"].iloc[-2:].mean()
-            amp_old = df["amplitude"].iloc[-5:-2].mean()
-            if amp_new < amp_old:
-                vol_converge = True
-        atr_old = (
-            float(df.iloc[-4]["atr"]) if not _nan(df.iloc[-4].get("atr")) else atr_val
-        )
-        if atr_val < atr_old:
-            vol_converge = True
-        if vol_converge:
-            score += 5
-
-    # 价格位置 (15)
-    if distance <= 0.8:
-        score += 15
-    elif distance <= 1.2:
-        score += 8
-        risk_flags.append("偏离均线略远")
-    else:
-        score += 2
-        risk_flags.append("偏离均线较远")
-
-    # 近两日伤害 (10)
-    if chg_2d > -3.5:
-        score += 10
-    else:
-        score += 4
-        risk_flags.append("急跌修复")
-
-    if close < ma20:
-        risk_flags.append("回踩MA20下方")
-
-    # 形态 / 企稳迹象 (25)
-    score += {
-        "锤子线": 25,
-        "双针探底": 22,
-        "小阳企稳": 20,
-        "十字星": 18,
-        "缩量横住": 15,
-        "长下影修复": 18,
-        "跌速收敛": 15,
-        "低点企稳": 14,
-        "小实体止跌": 12,
-    }.get(signal, 12)
-
-    # MACD (10)
-    if dif > dea:
-        score += 8
-    if len(df) >= 3:
-        mh = [
-            float(prev2["macd_hist"]),
-            float(prev["macd_hist"]),
-            float(last["macd_hist"]),
-        ]
-        if mh[2] > mh[1] > mh[0]:
-            score += 2
-
-    # 候选类型
-    candidate_type = "标准企稳"
-    high_risk_markers = {"回撤偏深", "缩量一般", "缩量不足", "偏离均线较远", "急跌修复", "回踩MA20下方"}
-    if any(flag in high_risk_markers for flag in risk_flags):
-        candidate_type = "高风险修复"
-
-    risk_text = "无明显风险" if not risk_flags else "，".join(dict.fromkeys(risk_flags))
+    risk_flags = list(
+        dict.fromkeys(trend_state["risks"] + pullback_state["risks"] + trigger_state["risks"])
+    )
+    candidate_type = "标准企稳" if not risk_flags else "高风险修复"
+    risk_text = "无明显风险" if not risk_flags else "，".join(risk_flags)
 
     return {
         "code": code,
@@ -454,13 +618,16 @@ def strategy_trend_pullback_stabilize(code, df):
         "形态": signal,
         "候选类型": candidate_type,
         "风险说明": risk_text,
-        "触发说明": signal,
+        "触发说明": f"{signal} / Trend:{int(trend_score)} Pullback:{int(pullback_score)} Trigger:{int(trigger_score)}",
         "总分": round(score, 1),
+        "趋势分": round(trend_score, 1),
+        "回调分": round(pullback_score, 1),
+        "触发分": round(trigger_score, 1),
         "close": round(close, 2),
         "MA10": round(ma10, 2),
         "MA20": round(ma20, 2),
-        "回撤": f"{drawdown * 100:.1f}%",
-        "缩量比": f"{vol_ratio:.2f}",
+        "回撤": f"{pullback_state['drawdown'] * 100:.1f}%",
+        "缩量比": f"{pullback_state['dryup_ratio']:.2f}",
         "DIF": round(dif, 3),
         "DEA": round(dea, 3),
         "MACD": round(macd_h, 3),
