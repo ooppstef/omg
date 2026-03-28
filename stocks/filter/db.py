@@ -9,9 +9,9 @@ import pandas as pd
 from stocks.db import dir_path
 
 # ---------- 配置 ----------
-INIT_DAYS = 60  # 初始化拉取天数
+INIT_DAYS = 200  # 初始化拉取交易日数（约10个月）
 WORKERS = 20  # 并发线程数
-COVERAGE_GATE = 0.98  # 增量更新覆盖率门槛
+COVERAGE_GATE = 0.90  # 增量更新覆盖率门槛
 INIT_COVERAGE_GATE = 0.80  # 全量初始化覆盖率门槛（宽松）
 
 PREFIXES = (
@@ -56,6 +56,21 @@ def _init_table():
 
 def _all_codes():
     """全市场股票代码（主板/创业板/科创板，排除ST）。"""
+    # adata 内部对未知代码前缀(如81开头港股通)会 KeyError，patch 掉
+    import sys
+    import adata.common.utils.code_utils as _cu
+    _orig = _cu.get_exchange_by_stock_code
+    def _safe_exchange(code):
+        try:
+            return _orig(code)
+        except KeyError:
+            return ""
+    _cu.get_exchange_by_stock_code = _safe_exchange
+    # adata 的 stock_code 模块用 from import 绑定了局部引用，也要 patch
+    _sc = sys.modules.get("adata.stock.info.stock_code")
+    if _sc:
+        _sc.get_exchange_by_stock_code = _safe_exchange
+
     df = adata.stock.info.all_code()
     if df is None or df.empty:
         return []
@@ -127,8 +142,8 @@ def _batch_fetch(codes, start, conn, table, label, progress):
             elif rows:
                 ok += 1
                 batch.extend(rows)
-            if progress and (done % 100 == 0 or done == total):
-                print(f"  {label}: {done}/{total}")
+            if progress and (done % 200 == 0 or done == total):
+                print(f"  {label}: {done}/{total} (成功:{ok} 失败:{fail})")
             if len(batch) >= 5000:
                 conn.executemany(sql, batch)
                 conn.commit()
@@ -324,6 +339,8 @@ def ensure_data(progress=True):
         raise RuntimeError("无法获取目标交易日（网络异常），请检查网络后重试")
 
     if _latest_date() < target:
+        if progress:
+            print(f"数据落后，目标交易日 {target}，开始增量更新...")
         incremental_update(progress)
         return
 
@@ -339,15 +356,15 @@ def ensure_data(progress=True):
     if ratio < COVERAGE_GATE:
         if progress:
             print(
-                f"覆盖 {count}/{expected} ({ratio:.1%})，低于 {COVERAGE_GATE:.0%}，全量重建"
+                f"覆盖 {count}/{expected} ({ratio:.1%})，低于 {COVERAGE_GATE:.0%}，增量补齐"
             )
-        full_init(progress)
+        incremental_update(progress)
     else:
         if progress:
             print("日线数据已是最新")
 
 
-def load_all(min_rows=30):
+def load_all(min_rows=60):
     """加载全部日线，返回 {code: DataFrame}，过滤不足 min_rows 的。"""
     conn = _conn()
     df = pd.read_sql("SELECT * FROM DailyQuote ORDER BY code, trade_date", conn)

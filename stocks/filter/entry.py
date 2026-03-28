@@ -30,6 +30,7 @@ def run_strategy(key):
     print(f"\n=== 执行筛选: {name} ===\n")
 
     # 1. 确保数据最新
+    print("检查数据...")
     try:
         filter_db.ensure_data(progress=True)
     except RuntimeError as e:
@@ -38,7 +39,7 @@ def run_strategy(key):
 
     # 2. 加载全市场日线
     print("加载日线数据...")
-    all_data = filter_db.load_all(min_rows=30)
+    all_data = filter_db.load_all(min_rows=60)
     if not all_data:
         print("无可用数据")
         return
@@ -66,8 +67,8 @@ def run_strategy(key):
         print("未筛选到符合条件的股票")
         return
 
-    print(f"\n命中 {len(hits)} 只:\n")
-    _print_results(hits)
+    print(f"\n命中 {len(hits)} 只，展示 Top 50:\n")
+    _print_results(hits[:50])
 
 
 def _print_results(hits):

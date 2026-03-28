@@ -7,3 +7,4 @@ my_list.txt
 */.serena/*
 .claude
 stocks/filter/__pycache__
+stocks/stocks.db
