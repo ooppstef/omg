@@ -321,17 +321,29 @@ def incremental_update(progress=True):
 # ---------- 对外接口 ----------
 
 
-def ensure_data(progress=True):
-    """确保数据可用且最新。
+def _check_stamp_path():
+    return dir_path().replace(".db", ".last_check")
 
-    1. 无数据 → 全量初始化
-    2. 日期过期 → 增量更新
-    3. 日期最新但覆盖率不足 → 全量重建（增量补不回历史K线）
-    """
+
+def ensure_data(progress=True):
+    """确保数据可用且最新。每天只检查一次，检查成功后记录时间戳。"""
+    import os
+
+    stamp = _check_stamp_path()
+    today = datetime.date.today().isoformat()
+    if os.path.exists(stamp):
+        with open(stamp) as f:
+            if f.read().strip() == today:
+                if progress:
+                    print("今日已检查，跳过")
+                return
+
     _init_table()
 
     if _latest_date() is None:
         full_init(progress)
+        with open(stamp, "w") as f:
+            f.write(today)
         return
 
     target = _target_date()
@@ -342,6 +354,8 @@ def ensure_data(progress=True):
         if progress:
             print(f"数据落后，目标交易日 {target}，开始增量更新...")
         incremental_update(progress)
+        with open(stamp, "w") as f:
+            f.write(today)
         return
 
     # 日期最新，检查覆盖率（分母用全市场应有数，防止残缺库自我验证100%）
@@ -362,6 +376,9 @@ def ensure_data(progress=True):
     else:
         if progress:
             print("日线数据已是最新")
+
+    with open(stamp, "w") as f:
+        f.write(today)
 
 
 def load_all(min_rows=60):

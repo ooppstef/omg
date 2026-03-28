@@ -8,3 +8,4 @@ my_list.txt
 .claude
 stocks/filter/__pycache__
 stocks/stocks.db
+stocks/stocks.last_check

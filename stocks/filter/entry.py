@@ -44,13 +44,16 @@ def run_strategy(key):
         print("无可用数据")
         return
 
-    # 3. 构建名称映射
+    # 3. 构建名称映射，排除 ST 股
     name_map = _get_name_map()
+    st_codes = {c for c, n in name_map.items() if "ST" in n.upper()}
 
     # 4. 逐只计算指标 + 跑策略
-    print(f"筛选中... 共 {len(all_data)} 只股票")
+    print(f"筛选中... 共 {len(all_data)} 只股票（排除 {len(st_codes)} 只ST）")
     hits = []
     for code, df in all_data.items():
+        if code in st_codes:
+            continue
         df = indicator.compute_all(df)
         result = func(code, df)
         if result is not None:

@@ -30,13 +30,15 @@ CLEAR_UPTREND_RULES = {
     "breakaway_closes_min": 4,
     "breakout_day_change_pct": 8.0,
     "breakout_days_min": 1,
+    "rally_min_days": 5,           # 上升段至少跨 5 个交易日
+    "single_day_advance_max": 0.5,  # 单日涨幅不能贡献超过总涨幅的 50%
 }
 
 TREND_PULLBACK_RULES = {
     "close_vs_ma20_min": 0.965,
     "ma10_vs_ma20_min": 0.995,
     "drawdown_min": 0.03,
-    "drawdown_max": 0.18,
+    "drawdown_max": 0.15,
     "vol_ratio_max": 1.35,
     "distance_atr_max": 1.6,
     "support_line_ratio": 0.985,
@@ -61,6 +63,10 @@ def get_trend_pullback_review_context():
         "chg_2d_min": TREND_PULLBACK_RULES["chg_2d_min"],
         "clear_uptrend": CLEAR_UPTREND_RULES.copy(),
         "requires_signal": True,
+        "min_price": 5.0,
+        "meme_limit_up_max": 2,
+        "min_days_since_peak": 3,
+        "v_recovery_3d_max": 8.0,
     }
 
 
@@ -193,6 +199,15 @@ def _has_clear_uptrend(df):
 
     advance = (peak_high - rally_low) / rally_low
     peak_spread = peak_high / peak_ma20 - 1.0
+
+    # 上升段必须是渐进的：跨度 >= N 天，且单日最大涨幅不能贡献超过总涨幅的 50%
+    if len(seg) < CLEAR_UPTREND_RULES["rally_min_days"]:
+        return False
+    if advance > 0:
+        max_single_day = float(seg["change_pct"].max()) / 100.0
+        if max_single_day / advance > CLEAR_UPTREND_RULES["single_day_advance_max"]:
+            return False
+
     closes_above_ma20 = (seg["close"] > seg["ma20"]).sum()
     ma10_above_ma20 = (seg["ma10"] > seg["ma20"]).sum()
     closes_break_away = (
@@ -249,7 +264,30 @@ def strategy_trend_pullback_stabilize(code, df):
 
     # --- 硬条件 ---
 
-    # 0. 回调前必须先有一段清晰上升，而不是底部反弹后横住
+    # 0a. 最低股价过滤
+    if close < 5.0:
+        return None
+
+    # 0b. 妖股过滤：近15日内不能有 ≥2 个涨停板
+    recent_15 = df["change_pct"].iloc[-15:]
+    if (recent_15 >= 9.5).sum() >= 2:
+        return None
+
+    # 0c. 从高点回调至少 3 个交易日（排除刚见顶就判定企稳）
+    high_idx = df["high"].iloc[-20:].idxmax()
+    days_since_peak = len(df) - 1 - high_idx
+    if days_since_peak < 3:
+        return None
+
+    # 0d. 排除已经 V 型反弹完的：近5日累计涨幅不超过 8%，且从近期低点反弹不超过 5%
+    chg_5d = df["change_pct"].iloc[-5:].sum()
+    if chg_5d > 8.0:
+        return None
+    recent_low = float(df["low"].iloc[-7:].min())
+    if recent_low > 0 and (close - recent_low) / recent_low > 0.05:
+        return None
+
+    # 0e. 回调前必须先有一段清晰上升，而不是底部反弹后横住
     if not _has_clear_uptrend(df):
         return None
 
