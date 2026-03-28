@@ -3,3 +3,4 @@ adata
 pypinyin
 pandas
 matplotlib
+TA-Lib

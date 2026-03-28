@@ -7,6 +7,7 @@
 """
 
 import math
+import talib
 
 
 def _nan(val):
@@ -67,36 +68,34 @@ def get_trend_pullback_review_context():
 
 
 def _detect_pattern(df):
-    """检测最新K线止跌形态。优先级：锤子线 > 双针 > 小阳企稳 > 十字星 > 缩量横住。"""
+    """检测最新K线止跌形态。优先级：锤子线 > 双针 > 小阳企稳 > 十字星 > 缩量横住。
+
+    锤子线、十字星使用 TA-Lib 识别；双针探底、小阳企稳、缩量横住为自定义组合形态。
+    """
     if len(df) < 3:
         return None
 
-    last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+    op = df["open"].values.astype(float)
+    hi = df["high"].values.astype(float)
+    lo = df["low"].values.astype(float)
+    cl = df["close"].values.astype(float)
 
-    o, h, l, c = (
-        float(last["open"]),
-        float(last["high"]),
-        float(last["low"]),
-        float(last["close"]),
-    )
-    body = abs(c - o)
-    lower = min(c, o) - l
-    rng = h - l
+    # TA-Lib: 锤子线 (Hammer)
+    # 特征：小实体在K线上端，长下影线(≥实体2倍)，几乎无上影线，需前期处于下跌趋势
+    # 含义：空方力竭，多方开始反击，看涨反转信号
+    if talib.CDLHAMMER(op, hi, lo, cl)[-1] != 0:
+        return "锤子线"
 
-    # 锤子线：下影线/实体 >= 2.5，上影线 <= 振幅 25%
-    if rng > 0 and body > 0:
-        if lower >= body * 2.5 and (h - max(c, o)) <= rng * 0.25:
-            return "锤子线"
+    # 双针探底（自定义：连续2日下影线/实体 >= 1.5）
+    last, prev = df.iloc[-1], df.iloc[-2]
+    body = abs(cl[-1] - op[-1])
+    lower = min(cl[-1], op[-1]) - lo[-1]
+    pb = abs(float(prev["close"]) - float(prev["open"]))
+    pl_shadow = min(float(prev["close"]), float(prev["open"])) - float(prev["low"])
+    if pb > 0 and body > 0 and lower >= body * 1.5 and pl_shadow >= pb * 1.5:
+        return "双针探底"
 
-    # 双针：连续2日 下影线/实体 >= 1.5
-    po, pl, pc = float(prev["open"]), float(prev["low"]), float(prev["close"])
-    pb = abs(pc - po)
-    pl_shadow = min(pc, po) - pl
-    if pb > 0 and body > 0:
-        if lower >= body * 1.5 and pl_shadow >= pb * 1.5:
-            return "双针探底"
-
-    # 小阳企稳：涨跌幅 -0.5%~+1.5%，振幅 <= 前3日均振幅 * 0.8
+    # 小阳企稳（自定义：涨跌幅 -0.5%~+1.5%，振幅收窄）
     chg = float(last.get("change_pct", 0) or 0)
     amp = float(last.get("amplitude", 0) or 0)
     if len(df) >= 4 and "amplitude" in df.columns:
@@ -104,18 +103,21 @@ def _detect_pattern(df):
         if -0.5 <= chg <= 1.5 and amp > 0 and avg_amp > 0 and amp <= avg_amp * 0.8:
             return "小阳企稳"
 
-    # 十字星：实体 <= 振幅 10%
-    if rng > 0 and body <= rng * 0.10:
+    # TA-Lib: 十字星 (Doji)
+    # 特征：开盘价≈收盘价，实体极小，上下影线可长可短
+    # 含义：多空力量均衡，趋势犹豫，常出现在变盘点；下跌末端出现暗示卖压衰竭
+    if talib.CDLDOJI(op, hi, lo, cl)[-1] != 0:
         return "十字星"
 
-    # 缩量横住：连续3日小实体(< 1.5%)，未创新低
-    p2o, p2l, p2c = float(prev2["open"]), float(prev2["low"]), float(prev2["close"])
-    p2b = abs(p2c - p2o)
+    # 缩量横住（自定义：连续3日小实体，未创新低）
+    prev2 = df.iloc[-3]
+    p2b = abs(float(prev2["close"]) - float(prev2["open"]))
     thresh = 0.015
     all_small = all(
-        b / max(ref, 1.0) < thresh for b, ref in [(body, c), (pb, pc), (p2b, p2c)]
+        b / max(ref, 1.0) < thresh
+        for b, ref in [(body, cl[-1]), (pb, float(prev["close"])), (p2b, float(prev2["close"]))]
     )
-    if all_small and l >= min(pl, p2l) * 0.995:
+    if all_small and lo[-1] >= min(float(prev["low"]), float(prev2["low"])) * 0.995:
         return "缩量横住"
 
     return None
