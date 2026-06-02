@@ -2,9 +2,6 @@ import os
 from pathlib import Path
 
 
-DEFAULT_TARGET_PATH = Path(
-    "/Users/charles/Desktop/deer-flow/skills/custom/a-share-review/references/holdings-watchlist.txt"
-)
 TARGET_ENV_NAME = "OMG_COPY_TARGET_PATH"
 
 
@@ -46,8 +43,10 @@ def _render_watchlist(lines, section_name="自选"):
 
 def sync_watchlist(source_path=None, target_path=None, section_name="自选"):
     source = Path(source_path) if source_path is not None else _default_source_path()
-    target_value = target_path if target_path is not None else os.getenv(TARGET_ENV_NAME)
-    target = Path(target_value) if target_value else DEFAULT_TARGET_PATH
+    target_value = target_path or os.getenv(TARGET_ENV_NAME)
+    if not target_value:
+        raise ValueError(f"请通过 {TARGET_ENV_NAME} 环境变量或 target_path 参数指定同步目标文件")
+    target = Path(target_value)
 
     if not source.exists():
         raise FileNotFoundError(f"源文件不存在: {source}")
@@ -61,6 +60,9 @@ def sync_watchlist(source_path=None, target_path=None, section_name="自选"):
 
 
 def copy_watchlist():
-    count = sync_watchlist()
-    print(f"已同步 {count} 只自选到 DeerFlow skill")
+    try:
+        count = sync_watchlist()
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(str(error)) from None
 
+    print(f"已同步 {count} 只自选到目标文件")

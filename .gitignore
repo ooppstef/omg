@@ -2,6 +2,13 @@ stocks/__pycache__/*
 stocks/charles_stock_tools.egg-info/*
 charles_stock_tools.egg-info/*
 __pycache__/*
+.DS_Store
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+*.pyc
 .serena/*
 my_list.txt
 */.serena/*
