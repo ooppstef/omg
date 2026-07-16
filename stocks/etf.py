@@ -15,12 +15,12 @@ import pandas as pd
 BENCH_CODE = "510300"
 STATE_START = "启动趋势"
 STATE_STRONG = "强趋势"
-STATE_WEAKEN = "走弱见顶"
-STATE_DOWN = "弱势续跌"
+STATE_WEAKEN = "见顶迹象"
+STATE_DOWN = "空头趋势"
 STATE_CHOP = "无效震荡"
 STATES = (STATE_START, STATE_STRONG, STATE_WEAKEN, STATE_DOWN, STATE_CHOP)
 # 报告分组顺序（与扫描关注优先级一致）
-REPORT_ORDER = (STATE_START, STATE_WEAKEN, STATE_STRONG, STATE_DOWN, STATE_CHOP)
+REPORT_ORDER = (STATE_START, STATE_WEAKEN, STATE_DOWN, STATE_STRONG, STATE_CHOP)
 
 HORIZON_SHORT = "short"
 HORIZON_MID = "mid"
@@ -45,10 +45,10 @@ _HORIZON_CFG = {
         "ma_spread_chop": 0.015,
         "abs_ret_chop": 0.03,
         "abs_slope_chop": 0.005,
-        "top_range": 0.75,
-        "top_ret_hard": -0.02,  # 对 ret_5
-        "top_vol": 1.4,
-        "break_range": 0.7,
+        "top_range": 0.65,
+        "top_ret_hard": -0.015,  # 对 ret_5
+        "top_vol": 1.3,
+        "break_range": 0.55,
         "start_slope": 0.003,
         "start_excess": 0.005,
         "start_vol": 1.25,
@@ -67,10 +67,10 @@ _HORIZON_CFG = {
         "ma_spread_chop": 0.02,
         "abs_ret_chop": 0.05,
         "abs_slope_chop": 0.008,
-        "top_range": 0.8,
-        "top_ret_hard": -0.03,  # 对 ret_20
-        "top_vol": 1.3,
-        "break_range": 0.65,
+        "top_range": 0.7,
+        "top_ret_hard": -0.02,  # 对 ret_20
+        "top_vol": 1.25,
+        "break_range": 0.55,
         "start_slope": 0.004,
         "start_excess": 0.01,
         "start_vol": 1.15,
@@ -241,9 +241,23 @@ def compute_features(
     }
 
 
-def classify_horizon(features: dict, horizon: str) -> str:
+def _pct(v: Optional[float]) -> str:
+    if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return "-"
+    return f"{v * 100:+.1f}%"
+
+
+def _num(v: Optional[float], digits: int = 2) -> str:
+    if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return "-"
+    return f"{v:.{digits}f}"
+
+
+def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
+    """返回 (状态, 理由列表)。理由带关键数字，便于核对。"""
+    label = "短线" if horizon == HORIZON_SHORT else "中线"
     if not features or not features.get("ok"):
-        return STATE_CHOP
+        return STATE_CHOP, [f"{label}数据不足，默认无效震荡"]
 
     cfg = _HORIZON_CFG[horizon]
     slope = features.get("ma20_slope") or 0.0
@@ -258,6 +272,18 @@ def classify_horizon(features: dict, horizon: str) -> str:
     above_ma20 = features.get("above_ma20")
     ma_bull = features.get("ma_bull")
     ma_bear = features.get("ma_bear")
+    ret_name = "10日" if cfg["ret_key"] == "ret_10" else "20日"
+    excess_name = "10日超额" if cfg["excess_key"] == "excess_10" else "20日超额"
+
+    def metrics() -> list[str]:
+        return [
+            f"价{'站上' if above_ma20 else '跌破'}MA20",
+            f"MA20斜率{_pct(slope)}",
+            f"60日位置{_num(range_pos * 100, 0)}%",
+            f"{ret_name}涨跌{_pct(ret)}",
+            f"{excess_name}{_pct(excess)}",
+            f"量比(5/20日){_num(vol_ratio)}",
+        ]
 
     chop_vol = (
         vol_20 is not None
@@ -270,24 +296,70 @@ def classify_horizon(features: dict, horizon: str) -> str:
         and abs(ret) < cfg["abs_ret_chop"]
         and (chop_vol or abs(slope) < cfg["abs_slope_chop"])
     ):
-        return STATE_CHOP
+        why = [
+            f"{label}均线缠绕(MA20/60间距{_pct(ma_spread)})",
+            f"{ret_name}涨跌不大({_pct(ret)})",
+        ]
+        if chop_vol:
+            why.append("波动收敛")
+        else:
+            why.append(f"均线斜率平缓({_pct(slope)})")
+        return STATE_CHOP, why
 
     if cfg["use_ret_5_for_top"]:
         top_hit = range_pos >= cfg["top_range"] and (
             ret_5 < cfg["top_ret_hard"] or (ret_5 <= 0 and vol_ratio >= cfg["top_vol"])
         )
+        top_detail = []
+        if range_pos >= cfg["top_range"]:
+            top_detail.append(f"处60日偏高位({_num(range_pos * 100, 0)}%)")
+        if ret_5 < cfg["top_ret_hard"]:
+            top_detail.append(f"近5日回落({_pct(ret_5)})")
+        elif ret_5 <= 0 and vol_ratio >= cfg["top_vol"]:
+            top_detail.append(f"高位滞涨放量(5日{_pct(ret_5)}，量比{_num(vol_ratio)})")
     else:
         top_hit = range_pos >= cfg["top_range"] and (
             ret < cfg["top_ret_hard"]
             or (ret <= 0.01 and vol_ratio >= cfg["top_vol"])
         )
+        top_detail = []
+        if range_pos >= cfg["top_range"]:
+            top_detail.append(f"处60日偏高位({_num(range_pos * 100, 0)}%)")
+        if ret < cfg["top_ret_hard"]:
+            top_detail.append(f"{ret_name}明显回落({_pct(ret)})")
+        elif ret <= 0.01 and vol_ratio >= cfg["top_vol"]:
+            top_detail.append(f"高位滞涨({ret_name}{_pct(ret)}，量比{_num(vol_ratio)})")
+
     if top_hit:
-        return STATE_WEAKEN
+        return STATE_WEAKEN, [f"{label}见顶：" + "；".join(top_detail)] + metrics()[:3]
+
     if above_ma20 is False and range_pos >= cfg["break_range"] and slope <= 0:
-        return STATE_WEAKEN
+        return STATE_WEAKEN, [
+            f"{label}见顶：跌破MA20且均线走平/下行",
+            f"60日位置仍偏高({_num(range_pos * 100, 0)}%)",
+            f"MA20斜率{_pct(slope)}",
+            f"{excess_name}{_pct(excess)}",
+        ]
+
+    if (
+        above_ma20 is False
+        and excess < -0.04
+        and range_pos >= 0.45
+        and slope <= 0
+        and ret < 0
+    ):
+        return STATE_WEAKEN, [
+            f"{label}见顶：破位且显著跑输大盘",
+            f"跌破MA20，{excess_name}{_pct(excess)}",
+            f"60日位置{_num(range_pos * 100, 0)}%，{ret_name}{_pct(ret)}",
+        ]
 
     if ma_bear and slope < 0 and ret < 0:
-        return STATE_DOWN
+        return STATE_DOWN, [
+            f"{label}空头：价格<MA20<MA60（空头排列）",
+            f"MA20下行({_pct(slope)})，{ret_name}{_pct(ret)}",
+            f"{excess_name}{_pct(excess)}，量比{_num(vol_ratio)}",
+        ]
 
     start_ok = (
         above_ma20
@@ -295,39 +367,78 @@ def classify_horizon(features: dict, horizon: str) -> str:
         and excess > cfg["start_excess"]
         and vol_ratio >= cfg["start_vol"]
     )
-    if cfg["start_require_not_firm_bull"]:
-        start_ok = start_ok and not (ma_bull and range_pos > 0.85)
-    if cfg["start_range_max"] is not None:
-        start_ok = start_ok and range_pos < cfg["start_range_max"]
-    if horizon == HORIZON_MID:
-        start_ok = start_ok and not ma_bull
+    start_block = []
+    if cfg["start_require_not_firm_bull"] and (ma_bull and range_pos > 0.85):
+        start_ok = False
+        start_block.append("已是牢固多头高位，不算启动")
+    if cfg["start_range_max"] is not None and not (range_pos < cfg["start_range_max"]):
+        start_ok = False
+    if horizon == HORIZON_MID and ma_bull:
+        start_ok = False
     if start_ok:
-        return STATE_START
+        return STATE_START, [
+            f"{label}启动：站上MA20 + 均线转多 + 超额转正 + 放量",
+            f"MA20斜率{_pct(slope)}（阈值>{_pct(cfg['start_slope'])}）",
+            f"{excess_name}{_pct(excess)}，量比{_num(vol_ratio)}",
+            f"60日位置{_num(range_pos * 100, 0)}%（尚未极端高位）",
+        ]
 
     if cfg["strong_need_excess"]:
         if ma_bull and slope >= 0 and excess >= 0:
-            return STATE_STRONG
+            return STATE_STRONG, [
+                f"{label}强趋势：多头排列(价>MA20>MA60)且未跑输大盘",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+                f"60日位置{_num(range_pos * 100, 0)}%，量比{_num(vol_ratio)}",
+            ]
         if (
             above_ma20
             and slope > 0
             and cfg["strong_alt_ret"] is not None
             and ret > cfg["strong_alt_ret"]
         ):
-            return STATE_STRONG
+            return STATE_STRONG, [
+                f"{label}强趋势：站上MA20且{ret_name}涨幅较大({_pct(ret)})",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+            ]
     else:
         if ma_bull and slope >= 0:
-            return STATE_STRONG
+            return STATE_STRONG, [
+                f"{label}强趋势：多头排列且均线未下行",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+                f"60日位置{_num(range_pos * 100, 0)}%",
+            ]
         if cfg["strong_use_ma60"] and features.get("above_ma60") and slope > 0 and excess > 0:
-            return STATE_STRONG
+            return STATE_STRONG, [
+                f"{label}强趋势：站上MA60 + 均线向上 + 超额为正",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+            ]
 
     if cfg["down_alt_ret"] is None:
         if ma_bear or (not above_ma20 and slope < 0):
-            return STATE_DOWN
+            why = [f"{label}空头："]
+            if ma_bear:
+                why[0] += "空头排列"
+            else:
+                why[0] += "跌破MA20且均线下行"
+            return STATE_DOWN, why + [
+                f"MA20斜率{_pct(slope)}，{ret_name}{_pct(ret)}",
+                f"{excess_name}{_pct(excess)}",
+            ]
     else:
         if ma_bear or (not above_ma20 and ret < cfg["down_alt_ret"]):
-            return STATE_DOWN
+            why = [f"{label}空头："]
+            if ma_bear:
+                why[0] += "空头排列"
+            else:
+                why[0] += f"跌破MA20且{ret_name}弱势({_pct(ret)})"
+            return STATE_DOWN, why + [
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+            ]
 
-    return STATE_CHOP
+    why = [f"{label}未满足明确多空条件，判为震荡"] + metrics()[:4]
+    if start_block:
+        why.extend(start_block)
+    return STATE_CHOP, why
 
 
 def classify_etf(
@@ -336,9 +447,13 @@ def classify_etf(
     bench_close: pd.Series,
 ) -> dict:
     feat = compute_features(close, amount, bench_close)
+    short_state, short_reasons = classify_horizon(feat, HORIZON_SHORT)
+    mid_state, mid_reasons = classify_horizon(feat, HORIZON_MID)
     return {
-        "short_state": classify_horizon(feat, HORIZON_SHORT),
-        "mid_state": classify_horizon(feat, HORIZON_MID),
+        "short_state": short_state,
+        "mid_state": mid_state,
+        "short_reasons": short_reasons,
+        "mid_reasons": mid_reasons,
         "features": feat,
         "available": bool(feat.get("ok")),
     }
@@ -351,67 +466,33 @@ def _fmt_chg(chg) -> str:
 
 
 def build_comment(row: dict) -> str:
-    feat = row.get("features") or {}
-    short = row.get("short_state") or ""
-    mid = row.get("mid_state") or ""
-    parts = []
+    """兼容旧接口：把短线理由拼成一句话。"""
+    reasons = row.get("short_reasons") or []
+    if reasons:
+        text = "；".join(reasons[:4])
+        mid = row.get("mid_state")
+        short = row.get("short_state")
+        if mid and short and mid != short:
+            text += f"；中线={mid}"
+        chg = row.get("change_pct")
+        if isinstance(chg, (int, float)) and chg == chg:
+            text += f"；当日{_fmt_chg(chg)}"
+        return text
+    return "数据不足，暂无点评"
 
-    vol_ratio = feat.get("vol_ratio")
-    excess_10 = feat.get("excess_10")
-    range_pos = feat.get("range_pos_60")
-    slope = feat.get("ma20_slope")
 
-    if vol_ratio is not None:
-        if vol_ratio >= 1.5:
-            parts.append("近5日明显放量")
-        elif vol_ratio >= 1.25:
-            parts.append("温和放量")
-        elif vol_ratio <= 0.75:
-            parts.append("量能收缩")
-        else:
-            parts.append("量能平稳")
-
-    if excess_10 is not None:
-        if excess_10 >= 0.03:
-            parts.append("相对沪深300显著超额")
-        elif excess_10 >= 0.01:
-            parts.append("略有超额")
-        elif excess_10 <= -0.03:
-            parts.append("相对大盘明显落后")
-        elif excess_10 <= -0.01:
-            parts.append("略弱于大盘")
-
-    short_text = {
-        STATE_START: "短线均线转多、有启动迹象",
-        STATE_STRONG: "短线多头延续",
-        STATE_WEAKEN: "高位走弱需警惕",
-        STATE_DOWN: "空头格局延续",
-        STATE_CHOP: "方向不清、偏震荡",
-    }
-    if short in short_text:
-        parts.append(short_text[short])
-
-    if mid != short:
-        parts.append(f"中线偏{mid}")
-
-    if range_pos is not None and range_pos >= 0.85 and short in (STATE_STRONG, STATE_START):
-        parts.append("已处60日高位区")
-    if slope is not None and slope < -0.01:
-        parts.append("均线下行")
-
+def build_reason_block(row: dict) -> str:
+    short_rs = row.get("short_reasons") or []
+    mid_rs = row.get("mid_reasons") or []
+    lines = []
+    if short_rs:
+        lines.append("短线理由: " + "；".join(short_rs[:4]))
+    if mid_rs:
+        lines.append("中线理由: " + "；".join(mid_rs[:3]))
     chg = row.get("change_pct")
     if isinstance(chg, (int, float)) and chg == chg:
-        parts.append(f"当日{_fmt_chg(chg)}")
-
-    if not parts:
-        return "数据不足，暂无点评"
-    seen = set()
-    out = []
-    for p in parts:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return "；".join(out[:5])
+        lines.append(f"当日涨跌: {_fmt_chg(chg)}")
+    return "\n".join(f"   {x}" for x in lines) if lines else "   理由: 暂无"
 
 
 def fetch_etf_frame(fund_code: str, start_date: str) -> pd.DataFrame:
@@ -471,6 +552,8 @@ def analyze_one(meta: dict, bench_close: pd.Series, start_date: str) -> dict:
         "available": False,
         "short_state": STATE_CHOP,
         "mid_state": STATE_CHOP,
+        "short_reasons": ["行情不足"],
+        "mid_reasons": [],
         "change_pct": None,
         "features": {},
         "comment": "行情不足",
@@ -486,6 +569,8 @@ def analyze_one(meta: dict, bench_close: pd.Series, start_date: str) -> dict:
             "available": result["available"],
             "short_state": result["short_state"],
             "mid_state": result["mid_state"],
+            "short_reasons": result.get("short_reasons") or [],
+            "mid_reasons": result.get("mid_reasons") or [],
             "change_pct": _parse_change_pct(frame.iloc[-1].get("change_pct")),
             "features": result["features"],
         }
@@ -568,7 +653,7 @@ def print_etf_report(rows: list[dict]) -> None:
 
     print("\n=== 主题 ETF 走势点评（短线+中线）===")
     print("说明: 宇宙=每主题规模最大1只；对照=510300 沪深300ETF。")
-    print("      短线≈5-20日，中线≈20-60日；点评为规则生成，非预测。\n")
+    print("      短线≈5-20日，中线≈20-60日；每条含判定理由（规则+关键数字）。\n")
 
     by_state: dict[str, list] = {}
     for r in rows:
@@ -588,5 +673,5 @@ def print_etf_report(rows: list[dict]) -> None:
                 f"短线:{r['short_state']} 中线:{r['mid_state']}  "
                 f"涨跌:{_fmt_chg(r.get('change_pct'))} 超额10日:{excess_s}"
             )
-            print(f"   {r.get('comment') or ''}")
+            print(build_reason_block(r))
         print()

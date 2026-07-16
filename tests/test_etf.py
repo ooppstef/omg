@@ -6,6 +6,7 @@ import pandas as pd
 from stocks.etf import (
     STATES,
     build_comment,
+    build_reason_block,
     classify_etf,
     classify_horizon,
     compute_features,
@@ -42,18 +43,19 @@ class TestFeaturesAndState(unittest.TestCase):
         self.assertTrue(np.isfinite(feat["ret_10"]))
 
     def test_classify_uptrend_start(self):
-        # 长期横盘后近端抬升放量
         n = 120
         values = [1.0] * (n - 15) + list(np.linspace(1.0, 1.12, 15))
         close = _series(values)
         amount = _series([1e9] * (n - 8) + [2.0e9] * 8)
         bench = _series([1.0] * n)
         feat = compute_features(close, amount, bench)
-        short = classify_horizon(feat, "short")
+        short, reasons = classify_horizon(feat, "short")
         self.assertIn(short, STATES)
+        self.assertTrue(reasons)
         result = classify_etf(close, amount, bench)
         self.assertIn(result["short_state"], STATES)
         self.assertIn(result["mid_state"], STATES)
+        self.assertTrue(result["short_reasons"])
 
     def test_classify_chop(self):
         n = 120
@@ -63,26 +65,29 @@ class TestFeaturesAndState(unittest.TestCase):
         amount = _series([1e9] * n)
         bench = _series(noise * 0.99)
         feat = compute_features(close, amount, bench)
-        state = classify_horizon(feat, "short")
+        state, reasons = classify_horizon(feat, "short")
         self.assertEqual(state, "无效震荡")
+        self.assertTrue(any("缠绕" in r or "震荡" in r or "平缓" in r for r in reasons))
 
     def test_classify_weaken_near_high(self):
         n = 120
         up = list(np.linspace(1.0, 1.4, n - 8))
-        # 高位回落
         down = list(np.linspace(1.4, 1.32, 8))
         close = _series(up + down)
         amount = _series([1e9] * (n - 5) + [2.2e9] * 5)
         bench = _series(np.linspace(1.0, 1.15, n))
         feat = compute_features(close, amount, bench)
-        state = classify_horizon(feat, "short")
-        self.assertIn(state, ("走弱见顶", "弱势续跌", "无效震荡"))
+        state, reasons = classify_horizon(feat, "short")
+        self.assertIn(state, ("见顶迹象", "空头趋势", "无效震荡"))
+        self.assertTrue(reasons)
 
-    def test_build_comment_contains_keywords(self):
+    def test_build_comment_and_reason_block(self):
         row = {
             "short_state": "启动趋势",
             "mid_state": "无效震荡",
             "change_pct": 2.5,
+            "short_reasons": ["短线启动：站上MA20", "量比1.50"],
+            "mid_reasons": ["中线均线缠绕"],
             "features": {
                 "ret_10": 0.06,
                 "excess_10": 0.03,
@@ -92,7 +97,10 @@ class TestFeaturesAndState(unittest.TestCase):
             },
         }
         text = build_comment(row)
-        self.assertTrue(any(k in text for k in ("放量", "超额", "趋势", "均线")))
+        self.assertIn("站上MA20", text)
+        block = build_reason_block(row)
+        self.assertIn("短线理由", block)
+        self.assertIn("中线理由", block)
 
 
 if __name__ == "__main__":
