@@ -10,6 +10,8 @@ The project is built around public market data libraries and local files. It doe
 - Review hot market concepts and industry rotation.
 - Review East Money industry trading crowding (3-year amount-share percentile).
 - Review industry/theme ETF trend states with rule-based commentary.
+- Review market mood stages from East Money limit-up pools (via akshare).
+- Review style structure across CSI 300 / CSI 1000 / STAR 50 / dividend.
 - Read stock announcements.
 - Plot concept strength curves for one or more concepts.
 - Run local screening helpers.
@@ -35,11 +37,17 @@ omg notice
 omg rot
 omg crowd
 omg etf
+omg mood
+omg style
 omg filter
 omg -k 半导体 人工智能
 ```
 
 `omg etf` scans one largest-AUM ETF per theme (~81 names), labels short/mid regime, and prints volume-price commentary. Optional: `OMG_ETF_MAX=20` for a quicker smoke run.
+
+`omg mood` classifies emotion stages (冰点/修复/主升/分歧/退潮) from akshare limit-up / broken-board / limit-down / previous limit-up pools, then prints today metrics and a recent-day trend table. Optional: `OMG_MOOD_DAYS=8`.
+
+`omg style` compares CSI 300, CSI 1000, STAR 50, and dividend index via adata, labels structure (科技虹吸/小盘占优/大盘占优/红利防守/均衡扩散), and prints relative returns plus a recent-day table. Optional: `OMG_STYLE_DAYS=8`.
 
 To sync the `# 自选` section from `stocks/my_list.txt` to another local file:
 

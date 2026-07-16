@@ -6,6 +6,8 @@ import stocks.market as market
 import stocks.rot as rot_ana
 import stocks.crowd as crowd_ana
 import stocks.etf as etf_ana
+import stocks.mood as mood_ana
+import stocks.style as style_ana
 import stocks.filter.entry as stock_filter
 from stocks.filter.algo import STRATEGIES
 
@@ -62,6 +64,16 @@ def etf():
     """主题 ETF 走势点评（短线+中线）"""
     rows = etf_ana.scan_etf_states()
     etf_ana.print_etf_report(rows)
+
+
+def mood():
+    """市场情绪阶段（涨停四池）"""
+    mood_ana.analyze()
+
+
+def style():
+    """风格结构（大小盘/科技/红利）"""
+    style_ana.analyze()
 
 
 def _read_key():

@@ -14,6 +14,14 @@ setup(
             "omg=main_controller:main",
         ],
     },
-    install_requires=["requests", "adata", "pypinyin", "pandas", "matplotlib", "TA-Lib"],
+    install_requires=[
+        "requests",
+        "adata",
+        "akshare",
+        "pypinyin",
+        "pandas",
+        "matplotlib",
+        "TA-Lib",
+    ],
     include_package_data=True,
 )
