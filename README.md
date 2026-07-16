@@ -8,6 +8,8 @@ The project is built around public market data libraries and local files. It doe
 
 - Query a local watchlist.
 - Review hot market concepts and industry rotation.
+- Review East Money industry trading crowding (3-year amount-share percentile).
+- Review industry/theme ETF trend states with rule-based commentary.
 - Read stock announcements.
 - Plot concept strength curves for one or more concepts.
 - Run local screening helpers.
@@ -31,9 +33,13 @@ omg list
 omg hot
 omg notice
 omg rot
+omg crowd
+omg etf
 omg filter
 omg -k 半导体 人工智能
 ```
+
+`omg etf` scans one largest-AUM ETF per theme (~81 names), labels short/mid regime, and prints volume-price commentary. Optional: `OMG_ETF_MAX=20` for a quicker smoke run.
 
 To sync the `# 自选` section from `stocks/my_list.txt` to another local file:
 

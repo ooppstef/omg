@@ -2,7 +2,7 @@ import argparse
 import re
 
 
-COMMANDS = ("list", "hot", "notice", "rot", "filter", "copy")
+COMMANDS = ("list", "hot", "notice", "rot", "filter", "copy", "crowd", "etf")
 
 
 def run_command(command):
@@ -20,6 +20,8 @@ def run_command(command):
         "hot": stocks.hot,
         "rot": stocks.rot,
         "filter": stocks.filter_menu,
+        "crowd": stocks.crowd,
+        "etf": stocks.etf,
     }
     actions[command]()
 
@@ -30,7 +32,7 @@ def main():
         "command",
         nargs="?",
         choices=COMMANDS,
-        help="执行的命令: list(自选列表), hot(热点强度), notice(公告列表), rot(板块轮动), filter(筛选菜单), copy(同步自选)",
+        help="执行的命令: list(自选列表), hot(热点强度), notice(公告列表), rot(板块轮动), filter(筛选菜单), copy(同步自选), crowd(交易拥挤度), etf(主题ETF点评)",
     )
     parser.add_argument(
         "-k",
@@ -50,7 +52,7 @@ def main():
         return
 
     if not args.command:
-        print("用法: omg [list|hot|notice|rot|filter|copy] 或 omg -k 概念名称")
+        print("用法: omg [list|hot|notice|rot|filter|copy|crowd|etf] 或 omg -k 概念名称")
         return
 
     run_command(args.command)

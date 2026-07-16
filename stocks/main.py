@@ -4,6 +4,8 @@ import stocks.db as db
 import stocks.ana as ana
 import stocks.market as market
 import stocks.rot as rot_ana
+import stocks.crowd as crowd_ana
+import stocks.etf as etf_ana
 import stocks.filter.entry as stock_filter
 from stocks.filter.algo import STRATEGIES
 
@@ -48,6 +50,18 @@ def k(concept_names):
 def rot():
     """热点板块轮动分析"""
     rot_ana.analyze(days=5, top_concepts=10, top_stocks=5)
+
+
+def crowd():
+    """概念交易拥挤度（3年分位）"""
+    rows = crowd_ana.scan_concept_crowding(top=15)
+    crowd_ana.print_crowding_table(rows)
+
+
+def etf():
+    """主题 ETF 走势点评（短线+中线）"""
+    rows = etf_ana.scan_etf_states()
+    etf_ana.print_etf_report(rows)
 
 
 def _read_key():
