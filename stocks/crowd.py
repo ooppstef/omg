@@ -396,6 +396,7 @@ def compute_board_crowding(
             "ths_code": ths_code,
             "board_name": board_name,
             "concept_name": board_name,
+            "trade_date": None,
             "change_pct": None,
             "available": False,
             "share": None,
@@ -406,7 +407,15 @@ def compute_board_crowding(
     board_amt = frame.set_index("trade_date")["amount"].sort_index()
     share = build_share_series(board_amt, market_amount)
     base = crowding_from_shares(share)
-    change_pct = frame.iloc[-1]["change_pct"]
+    trade_date = str(share.index[-1])[:10] if not share.empty else None
+    aligned_rows = (
+        frame.loc[frame["trade_date"] == trade_date]
+        if trade_date is not None
+        else frame.iloc[0:0]
+    )
+    change_pct = (
+        aligned_rows.iloc[-1]["change_pct"] if not aligned_rows.empty else None
+    )
     try:
         change_pct = float(change_pct) if pd.notna(change_pct) else None
     except (TypeError, ValueError):
@@ -416,6 +425,7 @@ def compute_board_crowding(
         "ths_code": ths_code,
         "board_name": board_name,
         "concept_name": board_name,
+        "trade_date": trade_date,
         "change_pct": change_pct,
         **base,
     }

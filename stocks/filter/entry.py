@@ -27,7 +27,7 @@ def run_strategy(key):
     """执行指定策略。"""
     if key not in STRATEGIES:
         print("未知策略")
-        return
+        return False
 
     name, func = STRATEGIES[key]
     print(f"\n=== 执行筛选: {name} ===\n")
@@ -38,14 +38,14 @@ def run_strategy(key):
         filter_db.ensure_data(progress=True)
     except RuntimeError as e:
         print(f"\n数据更新失败，筛选中止: {e}")
-        return
+        return False
 
     # 2. 加载全市场日线
     print("加载日线数据...")
     all_data = filter_db.load_all(min_rows=60)
     if not all_data:
         print("无可用数据")
-        return
+        return False
 
     # 3. 构建名称映射，排除 ST 股
     name_map = _get_name_map()
@@ -71,13 +71,14 @@ def run_strategy(key):
     # 6. 输出
     if not hits:
         print("未筛选到符合条件的股票")
-        return
+        return True
 
     print(f"\n命中 {len(hits)} 只，展示 Top 50:\n")
     for line in _glossary_lines():
         print(line)
     print()
     _print_results(hits[:50])
+    return True
 
 
 def _print_results(hits):

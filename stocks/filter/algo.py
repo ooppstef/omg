@@ -181,9 +181,10 @@ def _has_clear_uptrend(df):
     if len(df) < 25:
         return False
 
-    window = df.iloc[-CLEAR_UPTREND_RULES["window"] :]
+    data = df.reset_index(drop=True)
+    window = data.iloc[-CLEAR_UPTREND_RULES["window"] :]
     peak_idx = window["high"].idxmax()
-    peak = df.loc[peak_idx]
+    peak = data.loc[peak_idx]
 
     if _nan(peak.get("ma10")) or _nan(peak.get("ma20")):
         return False
@@ -194,7 +195,7 @@ def _has_clear_uptrend(df):
         return False
 
     start_idx = max(0, peak_idx - CLEAR_UPTREND_RULES["lookback"])
-    seg = df.iloc[start_idx : peak_idx + 1]
+    seg = data.iloc[start_idx : peak_idx + 1]
     rally_low = float(seg["low"].min())
     if rally_low <= 0:
         return False
@@ -335,26 +336,27 @@ def _pullback_state(df):
             state["notes"].append(f"缺少回调列:{col}")
             return state
 
-    window = df.iloc[-20:] if len(df) >= 20 else df
+    data = df.reset_index(drop=True)
+    window = data.iloc[-20:] if len(data) >= 20 else data
     peak_idx = window["high"].idxmax()
-    last = df.iloc[-1]
+    last = data.iloc[-1]
     close = float(last["close"])
-    peak_high = float(df.loc[peak_idx, "high"])
+    peak_high = float(data.loc[peak_idx, "high"])
     atr_val = float(last["atr"])
     ma20 = float(last["ma20"])
     if atr_val <= 0 or peak_high <= 0 or ma20 <= 0:
         state["notes"].append("回调基础数据异常")
         return state
 
-    days_since_peak = len(df) - 1 - peak_idx
+    days_since_peak = len(data) - 1 - peak_idx
     state["days_since_peak"] = days_since_peak
     drawdown = (peak_high - close) / peak_high
     drawdown_atr = (peak_high - close) / atr_val
     state["drawdown"] = drawdown
     state["drawdown_atr"] = drawdown_atr
 
-    up_leg = df.iloc[max(0, peak_idx - 10) : peak_idx + 1]
-    pullback = df.iloc[peak_idx + 1 :]
+    up_leg = data.iloc[max(0, peak_idx - 10) : peak_idx + 1]
+    pullback = data.iloc[peak_idx + 1 :]
     if pullback.empty:
         state["notes"].append("尚未形成回调段")
         return state
@@ -417,7 +419,7 @@ def _pullback_state(df):
     else:
         state["notes"].append("回调中出现派发簇")
 
-    if "obv" in df.columns and not _nan(last.get("obv")):
+    if "obv" in data.columns and not _nan(last.get("obv")):
         obv_ref = pullback["obv"].iloc[:-1] if len(pullback) > 1 else pullback["obv"]
         if not obv_ref.empty and float(last["obv"]) >= float(obv_ref.min()):
             state["score"] += 4
@@ -632,19 +634,9 @@ def trend_pullback(code, df):
     }
 
 
-# ---------- 占位策略 ----------
-
-
-def _placeholder(code, df):
-    return None
-
-
 # 策略注册表：菜单序号 -> (名称, 函数)
 STRATEGIES = {
     "1": ("趋势回调企稳", trend_pullback),
-    "2": ("策略2", _placeholder),
-    "3": ("策略3", _placeholder),
-    "4": ("策略4", _placeholder),
 }
 
 

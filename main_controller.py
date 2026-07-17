@@ -2,41 +2,32 @@ import argparse
 import re
 
 
-COMMANDS = (
-    "list",
-    "hot",
-    "notice",
-    "rot",
-    "filter",
-    "copy",
-    "crowd",
-    "etf",
-    "mood",
-    "style",
-)
+COMMAND_META = {
+    "init": ("init_data", "初始化本地数据"),
+    "list": ("my_list", "自选列表"),
+    "hot": ("hot", "热点强度"),
+    "notice": ("notice", "公告列表"),
+    "rot": ("rot", "板块轮动"),
+    "filter": ("filter_menu", "筛选菜单"),
+    "copy": (None, "同步自选"),
+    "crowd": ("crowd", "交易拥挤度"),
+    "etf": ("etf", "主题ETF点评"),
+    "mood": ("mood", "市场情绪"),
+    "style": ("style", "风格结构"),
+}
+COMMANDS = tuple(COMMAND_META)
 
 
 def run_command(command):
     if command == "copy":
         import stocks.copy_watchlist as copy_watchlist
 
-        copy_watchlist.copy_watchlist()
-        return
+        return copy_watchlist.copy_watchlist()
 
     import stocks.main as stocks
 
-    actions = {
-        "list": stocks.my_list,
-        "notice": stocks.notice,
-        "hot": stocks.hot,
-        "rot": stocks.rot,
-        "filter": stocks.filter_menu,
-        "crowd": stocks.crowd,
-        "etf": stocks.etf,
-        "mood": stocks.mood,
-        "style": stocks.style,
-    }
-    actions[command]()
+    handler_name = COMMAND_META[command][0]
+    return getattr(stocks, handler_name)()
 
 
 def main():
@@ -45,11 +36,8 @@ def main():
         "command",
         nargs="?",
         choices=COMMANDS,
-        help=(
-            "执行的命令: list(自选列表), hot(热点强度), notice(公告列表), "
-            "rot(板块轮动), filter(筛选菜单), copy(同步自选), crowd(交易拥挤度), "
-            "etf(主题ETF点评), mood(市场情绪), style(风格结构)"
-        ),
+        help="执行的命令: "
+        + ", ".join(f"{command}({meta[1]})" for command, meta in COMMAND_META.items()),
     )
     parser.add_argument(
         "-k",
@@ -65,18 +53,16 @@ def main():
 
         combined = " ".join(args.k)
         concepts = [c.strip() for c in re.split(r"[,，\s]+", combined) if c.strip()]
-        stocks.k(concepts)
-        return
+        return 0 if stocks.k(concepts) is not False else 1
 
     if not args.command:
         print(
-            "用法: omg [list|hot|notice|rot|filter|copy|crowd|etf|mood|style] "
-            "或 omg -k 概念名称"
+            f"用法: omg [{'|'.join(COMMANDS)}] 或 omg -k 概念名称"
         )
-        return
+        return 2
 
-    run_command(args.command)
+    return 0 if run_command(args.command) is not False else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

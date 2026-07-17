@@ -1,12 +1,15 @@
 import os
 from pathlib import Path
 
+from stocks.list_parser import initialize_my_list, my_list_path
+from stocks.paths import temporary_path_for
+
 
 TARGET_ENV_NAME = "OMG_COPY_TARGET_PATH"
 
 
 def _default_source_path():
-    return Path(__file__).with_name("my_list.txt")
+    return my_list_path()
 
 
 def extract_section_lines(content, section_name):
@@ -47,7 +50,11 @@ def sync_watchlist(source_path=None, target_path=None, section_name="自选"):
     if not target_value:
         raise ValueError(f"请通过 {TARGET_ENV_NAME} 环境变量或 target_path 参数指定同步目标文件")
     target = Path(target_value)
+    if source.resolve() == target.resolve():
+        raise ValueError("同步源文件与目标文件不能相同")
 
+    if source_path is None:
+        source = initialize_my_list()
     if not source.exists():
         raise FileNotFoundError(f"源文件不存在: {source}")
 
@@ -55,7 +62,15 @@ def sync_watchlist(source_path=None, target_path=None, section_name="自选"):
     watch_lines = extract_section_lines(content, section_name)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(_render_watchlist(watch_lines, section_name), encoding="utf-8")
+    temporary = temporary_path_for(target)
+    try:
+        temporary.write_text(
+            _render_watchlist(watch_lines, section_name),
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return len(watch_lines)
 
 
@@ -66,3 +81,4 @@ def copy_watchlist():
         raise SystemExit(str(error)) from None
 
     print(f"已同步 {count} 只自选到目标文件")
+    return count

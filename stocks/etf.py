@@ -253,6 +253,15 @@ def _num(v: Optional[float], digits: int = 2) -> str:
     return f"{v:.{digits}f}"
 
 
+def _feature_number(features: dict, key: str, default: float) -> float:
+    value = features.get(key)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
     """返回 (状态, 理由列表)。理由带关键数字，便于核对。"""
     label = "短线" if horizon == HORIZON_SHORT else "中线"
@@ -260,15 +269,15 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
         return STATE_CHOP, [f"{label}数据不足，默认无效震荡"]
 
     cfg = _HORIZON_CFG[horizon]
-    slope = features.get("ma20_slope") or 0.0
-    vol_ratio = features.get("vol_ratio") or 1.0
-    range_pos = features.get("range_pos_60") or 0.5
-    ma_spread = features.get("ma_spread") or 0.0
+    slope = _feature_number(features, "ma20_slope", 0.0)
+    vol_ratio = _feature_number(features, "vol_ratio", 1.0)
+    range_pos = _feature_number(features, "range_pos_60", 0.5)
+    ma_spread = _feature_number(features, "ma_spread", 0.0)
     vol_20 = features.get("vol_20")
     vol_60 = features.get("vol_60")
-    excess = features.get(cfg["excess_key"]) or 0.0
-    ret = features.get(cfg["ret_key"]) or 0.0
-    ret_5 = features.get("ret_5") or 0.0
+    excess = _feature_number(features, cfg["excess_key"], 0.0)
+    ret = _feature_number(features, cfg["ret_key"], 0.0)
+    ret_5 = _feature_number(features, "ret_5", 0.0)
     above_ma20 = features.get("above_ma20")
     ma_bull = features.get("ma_bull")
     ma_bear = features.get("ma_bear")

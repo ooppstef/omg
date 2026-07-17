@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from stocks.etf import (
+    STATE_DOWN,
     STATES,
     build_comment,
     build_reason_block,
@@ -80,6 +81,25 @@ class TestFeaturesAndState(unittest.TestCase):
         state, reasons = classify_horizon(feat, "short")
         self.assertIn(state, ("见顶迹象", "空头趋势", "无效震荡"))
         self.assertTrue(reasons)
+
+    def test_zero_range_position_remains_real_low(self):
+        features = {
+            "ok": True,
+            "ma20_slope": -0.01,
+            "vol_ratio": 1.0,
+            "range_pos_60": 0.0,
+            "ma_spread": 0.1,
+            "vol_20": 0.02,
+            "vol_60": 0.02,
+            "excess_10": -0.05,
+            "ret_10": -0.10,
+            "ret_5": -0.05,
+            "above_ma20": False,
+            "ma_bull": False,
+            "ma_bear": True,
+        }
+        state, _ = classify_horizon(features, "short")
+        self.assertEqual(state, STATE_DOWN)
 
     def test_build_comment_and_reason_block(self):
         row = {

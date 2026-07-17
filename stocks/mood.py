@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import date, timedelta
 from typing import Any, Optional
@@ -87,7 +88,9 @@ def compute_mood_metrics(
         # 昨日涨停池接口的「涨跌幅」= 今日相对表现，即隔日溢价
         if "涨跌幅" in row and row["涨跌幅"] is not None:
             try:
-                premiums.append(float(row["涨跌幅"]))
+                value = float(row["涨跌幅"])
+                if math.isfinite(value):
+                    premiums.append(value)
             except (TypeError, ValueError):
                 pass
     premium = sum(premiums) / len(premiums) if premiums else None
@@ -251,6 +254,14 @@ def fetch_mood_history(days: Optional[int] = None) -> list[dict[str, Any]]:
         if len(rows) >= n:
             break
         pools = fetch_pools_for_date(d)
+        critical_errors = [
+            error
+            for error in pools.get("errors", [])
+            if error.split(":", 1)[0] in {"zt", "zb", "dt"}
+        ]
+        if critical_errors:
+            error_days += 1
+            continue
         if pools.get("errors") and not (
             pools["zt"] or pools["zb"] or pools["dt"] or pools["prev"]
         ):

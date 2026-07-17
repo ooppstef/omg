@@ -1,5 +1,6 @@
 import adata
 import datetime
+import math
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from stocks.stock_models import StockCurrentPrice
@@ -19,6 +20,14 @@ def get_recent_date(n):
     today = datetime.date.today()
     target_date = today - datetime.timedelta(days=n)
     return target_date.strftime("%Y-%m-%d")
+
+
+def _finite_float(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def east_top_list(top=30, print_result=True):
@@ -59,7 +68,6 @@ def _calculate_strength_scores(excess_returns, amounts):
     计算绝对强度分数（可正可负）
     公式：绝对强度 = 超额收益 × log(成交额/中位数成交额 + 1)
     """
-    import math
     median_amount = amounts.median()
     if median_amount == 0:
         median_amount = 1
@@ -82,7 +90,12 @@ def _get_benchmark_returns(start_date, days=10, verbose=True):
         if df is None or df.empty:
             return {}
         df = df.sort_values('trade_date').tail(days)
-        return dict(zip(df['trade_date'].astype(str).str[:10], df['change_pct']))
+        result = {}
+        for trade_date, change_pct in zip(df["trade_date"], df["change_pct"]):
+            value = _finite_float(change_pct)
+            if value is not None:
+                result[str(trade_date)[:10]] = value
+        return result
     except Exception as e:
         if verbose:
             print(f"获取沪深300基准失败: {e}")
@@ -105,7 +118,7 @@ CONCEPT_EXCLUDE = {
 def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
     """
     计算概念板块强度Top10
-    强度 = 0.6×z(超额收益) + 0.4×z(成交额)，转百分位(0-100)
+    强度 = 超额收益 × (1 + log(成交额/当日中位数成交额 + 1))
     exclude: 额外排除的板块名称集合
     """
     exclude_set = CONCEPT_EXCLUDE | set(exclude or [])
@@ -147,10 +160,14 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
                 date = str(r['trade_date'])[:10]
                 if date not in benchmark_dates:
                     continue
+                change_pct = _finite_float(r.get("change_pct"))
+                amount = _finite_float(r.get("amount"))
+                if change_pct is None or amount is None:
+                    continue
                 results.append({
                     'code': code, 'name': name, 'date': date,
-                    'change_pct': float(r.get('change_pct', 0) or 0),
-                    'amount': float(r.get('amount', 0) or 0)
+                    'change_pct': change_pct,
+                    'amount': amount,
                 })
             return results
         except Exception as e:
@@ -239,7 +256,6 @@ def concept_strength_chart(concept_names, days=10):
     concept_names: 板块名称或列表（支持模糊匹配）
     """
     import matplotlib.pyplot as plt
-    import math
     
     if isinstance(concept_names, str):
         concept_names = [concept_names]
@@ -250,6 +266,13 @@ def concept_strength_chart(concept_names, days=10):
     
     start_date = get_recent_date(days + 15)
     concept_df = adata.stock.info.all_concept_code_ths()
+    if (
+        concept_df is None
+        or concept_df.empty
+        or not {"name", "index_code"}.issubset(concept_df.columns)
+    ):
+        print("获取概念列表失败")
+        return None
     
     # 获取基准
     benchmark = _get_benchmark_returns(start_date, days, verbose=False)
@@ -259,10 +282,13 @@ def concept_strength_chart(concept_names, days=10):
     
     # 收集所有板块数据
     all_series = {}
-    all_dates = None
+    series_dates = {}
     
     for concept_name in concept_names:
-        matches = concept_df[concept_df['name'].str.contains(concept_name, na=False)]
+        names = concept_df["name"].astype("string")
+        matches = concept_df[
+            names.str.contains(str(concept_name), na=False, regex=False)
+        ]
         if matches.empty:
             print(f"未找到包含'{concept_name}'的板块")
             continue
@@ -289,8 +315,11 @@ def concept_strength_chart(concept_names, days=10):
             date = str(r['trade_date'])[:10]
             if date not in benchmark:
                 continue
-            excess = float(r.get('change_pct', 0) or 0) - benchmark[date]
-            amount = float(r.get('amount', 0) or 0)
+            change_pct = _finite_float(r.get("change_pct"))
+            amount = _finite_float(r.get("amount"))
+            if change_pct is None or amount is None:
+                continue
+            excess = change_pct - benchmark[date]
             ratio = amount / median_amount
             strength = excess * (1 + math.log(ratio + 1)) if ratio > 0 else excess
             dates.append(date[-5:])
@@ -298,8 +327,7 @@ def concept_strength_chart(concept_names, days=10):
         
         if dates:
             all_series[name] = strengths
-            if all_dates is None:
-                all_dates = dates
+            series_dates[name] = dates
     
     if not all_series:
         print("无有效数据")
@@ -311,10 +339,19 @@ def concept_strength_chart(concept_names, days=10):
     
     for i, (name, strengths) in enumerate(all_series.items()):
         color = colors[i % len(colors)]
-        ax.plot(all_dates, strengths, 'o-', label=name, color=color, markersize=5, linewidth=2)
+        ax.plot(
+            series_dates[name],
+            strengths,
+            'o-',
+            label=name,
+            color=color,
+            markersize=5,
+            linewidth=2,
+        )
     
     ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    ax.set_title(f'概念板块绝对强度对比 (近{len(all_dates)}天)')
+    max_days = max(len(dates) for dates in series_dates.values())
+    ax.set_title(f'概念板块绝对强度对比 (近{max_days}天)')
     ax.set_xlabel('日期')
     ax.set_ylabel('绝对强度')
     ax.legend(loc='best')

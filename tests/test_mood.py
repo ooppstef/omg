@@ -1,4 +1,7 @@
 import unittest
+from unittest.mock import patch
+
+import math
 
 from stocks.mood import (
     STATES,
@@ -10,6 +13,7 @@ from stocks.mood import (
     STATE_NEUTRAL,
     classify_mood,
     compute_mood_metrics,
+    fetch_mood_history,
     zhaban_rate,
 )
 
@@ -40,6 +44,36 @@ class TestMoodMetrics(unittest.TestCase):
         self.assertEqual(m["height"], 5)
         self.assertAlmostEqual(m["premium"], (3.0 - 1.0 + 5.0) / 3.0)
         self.assertAlmostEqual(m["first_board_ratio"], 1 / 3)
+
+    def test_compute_ignores_non_finite_premiums(self):
+        m = compute_mood_metrics(
+            [{"代码": "1", "连板数": 5}],
+            [],
+            [],
+            [
+                {"代码": "1", "涨跌幅": -8.0},
+                {"代码": "2", "涨跌幅": float("nan")},
+                {"代码": "3", "涨跌幅": float("inf")},
+            ],
+        )
+        self.assertFalse(math.isnan(m["premium"]))
+        self.assertEqual(m["premium"], -8.0)
+
+    @patch("stocks.mood._recent_calendar_dates", return_value=["20260716"])
+    @patch("stocks.mood.fetch_pools_for_date")
+    def test_history_skips_date_when_critical_pool_fails(
+        self, fetch_pools, _recent_dates
+    ):
+        fetch_pools.return_value = {
+            "date": "20260716",
+            "zt": [{"代码": str(i), "连板数": 5} for i in range(80)],
+            "zb": [],
+            "dt": [],
+            "prev": [],
+            "errors": ["dt:TimeoutError"],
+        }
+
+        self.assertEqual(fetch_mood_history(days=1), [])
 
 
 class TestClassifyMood(unittest.TestCase):

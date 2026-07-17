@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -6,6 +7,7 @@ from stocks.crowd import (
     MIN_HISTORY_DAYS,
     SHARE_SMOOTH_DAYS,
     build_share_series,
+    compute_board_crowding,
     compute_share,
     crowding_from_shares,
     history_start_date,
@@ -78,6 +80,30 @@ class TestShareSeries(unittest.TestCase):
     def test_history_start_date_format(self):
         d = history_start_date(10)
         self.assertRegex(d, r"^\d{4}-\d{2}-\d{2}$")
+
+    @patch("stocks.crowd.crowding_from_shares")
+    @patch("stocks.crowd.fetch_board_frame")
+    def test_board_result_uses_last_aligned_trade_date(self, fetch_frame, crowding):
+        fetch_frame.return_value = pd.DataFrame(
+            {
+                "trade_date": ["2026-07-16", "2026-07-17"],
+                "amount": [100.0, 200.0],
+                "change_pct": [1.0, 2.0],
+            }
+        )
+        crowding.return_value = {
+            "available": True,
+            "share": 0.1,
+            "share_5d": 0.1,
+            "crowd_pct": 80.0,
+            "history_days": 120,
+        }
+        market = pd.Series([1000.0], index=["2026-07-16"])
+
+        result = compute_board_crowding("BK001", "测试", market)
+
+        self.assertEqual(result["trade_date"], "2026-07-16")
+        self.assertEqual(result["change_pct"], 1.0)
 
 
 class TestRank(unittest.TestCase):

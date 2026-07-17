@@ -1,7 +1,8 @@
-requests
-adata
-akshare
-pypinyin
-pandas
-matplotlib
-TA-Lib
+requests~=2.32.3
+adata~=2.9.5
+akshare~=1.17.25
+pypinyin~=0.54.0
+pandas~=2.3.1
+matplotlib~=3.10.8
+TA-Lib~=0.6.8
+numpy~=2.2.6
