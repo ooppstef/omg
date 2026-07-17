@@ -30,12 +30,12 @@ class StockCurrentPrice:
             return 0.0
 
     def colored_change_percent(self):
-        if float(self.change_percent) > 0:
-            return f"\033[91m{self.change_percent}%\033[0m"  # 红色
-        elif float(self.change_percent) < 0:
-            return f"\033[92m{self.change_percent}%\033[0m"  # 绿色
-        else:
-            return f"{self.change_percent}%"  # 默认白色
+        change = float(self.change_percent)
+        if change > 0:
+            return f"\033[91m{self.change_percent}%\033[0m"
+        if change < 0:
+            return f"\033[92m{self.change_percent}%\033[0m"
+        return f"{self.change_percent}%"
 
     def price_text(self):
         try:

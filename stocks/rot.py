@@ -1,9 +1,9 @@
 import adata
-import datetime
 import math
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
+
+from stocks.util import env_int, recent_date
 
 # 常量配置
 WARM_THRESH = 50
@@ -13,26 +13,10 @@ LOOKBACK = 8
 RECENT_DAYS = 2
 WARM_DAYS = 3
 
+CONCEPT_WORKERS = env_int("OMG_ROT_CONCEPT_WORKERS", 20)
+STOCK_WORKERS = env_int("OMG_ROT_STOCK_WORKERS", 20)
 
-def _env_int(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
-
-
-CONCEPT_WORKERS = _env_int("OMG_ROT_CONCEPT_WORKERS", 20)
-STOCK_WORKERS = _env_int("OMG_ROT_STOCK_WORKERS", 20)
-
-
-def get_recent_date(n):
-    """获取n天前的日期"""
-    today = datetime.date.today()
-    return (today - datetime.timedelta(days=n)).strftime("%Y-%m-%d")
+get_recent_date = recent_date
 
 
 def _amount_mult(amount_series):

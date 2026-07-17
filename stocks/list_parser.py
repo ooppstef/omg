@@ -26,22 +26,22 @@ def initialize_my_list():
     return path
 
 
-def parse_my_list():
-    path = initialize_my_list()
-
+def parse_sections(content: str) -> dict:
     sections = {}
     current_section = None
-
-    with path.open("r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
-            if line.startswith("# "):
-                current_section = line[2:].strip()
-                sections[current_section] = []
-            elif line and current_section is not None:
-                sections[current_section].append(line)
-
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line.startswith("# "):
+            current_section = line[2:].strip()
+            sections[current_section] = []
+        elif line and current_section is not None:
+            sections[current_section].append(line)
     return sections
+
+
+def parse_my_list():
+    path = initialize_my_list()
+    return parse_sections(path.read_text(encoding="utf-8"))
 
 
 def get_section_by_name(name):

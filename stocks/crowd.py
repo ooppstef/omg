@@ -10,6 +10,8 @@ import adata
 import pandas as pd
 import requests
 
+from stocks.util import env_int, fmt_chg
+
 # 行业拥挤度：东财行业板块（BK）。
 # 历史 K 线走 push2his；若当前网络不可用，则用「同名」同花顺行业指数（881）作成交额代理
 #（实时额已验证与东财高度接近，如银行/半导体）。
@@ -357,17 +359,6 @@ def build_share_series(concept_amount: pd.Series, market_amount: pd.Series) -> p
     return (df["c"] / df["m"]).rename("share")
 
 
-def _env_int(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
-
-
 def _env_max_boards():
     """None=不截断；正整数=最多扫描 N 个行业。兼容旧环境变量名。"""
     for key in ("OMG_CROWD_MAX_INDUSTRIES", "OMG_CROWD_MAX_CONCEPTS"):
@@ -595,7 +586,7 @@ def attach_top_stocks(rows: list, top_n: int = 3, workers: int = 8) -> list:
 def scan_concept_crowding(top: int = 15, workers=None, exclude=None, top_stocks: int = 3) -> list:
     """扫描东财行业拥挤度（函数名保留以兼容 CLI）。"""
     if workers is None:
-        workers = _env_int("OMG_CROWD_WORKERS", 8)
+        workers = env_int("OMG_CROWD_WORKERS", 8)
     max_n = _env_max_boards()
 
     exclude_set = INDUSTRY_EXCLUDE | set(exclude or [])
@@ -654,19 +645,13 @@ def scan_concept_crowding(top: int = 15, workers=None, exclude=None, top_stocks:
     return ranked
 
 
-def _fmt_chg(chg) -> str:
-    if isinstance(chg, (int, float)) and chg == chg:
-        return f"{chg:+.2f}%"
-    return "-"
-
-
 def _fmt_stocks(stocks: list) -> str:
     if not stocks:
         return "（暂无代表股行情）"
     parts = []
     for s in stocks:
         name = s.get("name") or s.get("code") or "?"
-        parts.append(f"{name} {_fmt_chg(s.get('change_pct'))}")
+        parts.append(f"{name} {fmt_chg(s.get('change_pct'))}")
     return "、".join(parts)
 
 
@@ -692,6 +677,6 @@ def print_crowding_table(rows: list) -> None:
             f"拥挤 {crowd:.1f}%{ath}  "
             f"额占比 {share_pct:.2f}%  "
             f"5日额占比 {share5_pct:.2f}%  "
-            f"涨跌 {_fmt_chg(r.get('change_pct'))}"
+            f"涨跌 {fmt_chg(r.get('change_pct'))}"
         )
         print(f"   代表股: {_fmt_stocks(r.get('top_stocks') or [])}")

@@ -32,7 +32,6 @@ def run_strategy(key):
     name, func = STRATEGIES[key]
     print(f"\n=== 执行筛选: {name} ===\n")
 
-    # 1. 确保数据最新
     print("检查数据...")
     try:
         filter_db.ensure_data(progress=True)
@@ -40,18 +39,15 @@ def run_strategy(key):
         print(f"\n数据更新失败，筛选中止: {e}")
         return False
 
-    # 2. 加载全市场日线
     print("加载日线数据...")
     all_data = filter_db.load_all(min_rows=60)
     if not all_data:
         print("无可用数据")
         return False
 
-    # 3. 构建名称映射，排除 ST 股
     name_map = _get_name_map()
     st_codes = {c for c, n in name_map.items() if "ST" in n.upper()}
 
-    # 4. 逐只计算指标 + 跑策略
     print(f"筛选中... 共 {len(all_data)} 只股票（排除 {len(st_codes)} 只ST）")
     hits = []
     for code, df in all_data.items():
@@ -65,10 +61,8 @@ def run_strategy(key):
                 result["name"] = name_map.get(code, "")
             hits.append(result)
 
-    # 5. 按总分排序
     hits.sort(key=lambda x: float(x.get("总分", 0)), reverse=True)
 
-    # 6. 输出
     if not hits:
         print("未筛选到符合条件的股票")
         return True
@@ -155,8 +149,3 @@ def _result_lines(index, hit):
         lines.append(f"      {' | '.join(notes)}")
 
     return lines
-
-
-# 兼容旧名字，避免测试或脚本断掉
-_build_filter_glossary_lines = _glossary_lines
-_build_result_lines = _result_lines

@@ -52,24 +52,30 @@ TREND_PULLBACK_RULES = {
 
 def trend_pullback_ctx():
     """返回当前趋势回调企稳策略的关键阈值，供验证脚本复用。"""
-    return {
-        "adx_min": TREND_PULLBACK_RULES["adx_min"],
-        "days_since_peak_min": TREND_PULLBACK_RULES["days_since_peak_min"],
-        "days_since_peak_max": TREND_PULLBACK_RULES["days_since_peak_max"],
-        "drawdown_atr_min": TREND_PULLBACK_RULES["drawdown_atr_min"],
-        "drawdown_atr_max": TREND_PULLBACK_RULES["drawdown_atr_max"],
-        "dryup_ratio_max": TREND_PULLBACK_RULES["dryup_ratio_max"],
-        "distribution_days_max": TREND_PULLBACK_RULES["distribution_days_max"],
-        "close_vs_ma20_min": TREND_PULLBACK_RULES["close_vs_ma20_min"],
-        "close_vs_ma20_floor": TREND_PULLBACK_RULES["close_vs_ma20_floor"],
-        "rv20_repair_min": TREND_PULLBACK_RULES["rv20_repair_min"],
-        "rv20_trigger_min": TREND_PULLBACK_RULES["rv20_trigger_min"],
-        "close_loc_trigger_min": TREND_PULLBACK_RULES["close_loc_trigger_min"],
-        "clear_uptrend": CLEAR_UPTREND_RULES.copy(),
-        "state_machine": ("trend", "pullback", "trigger"),
-        "min_price": 5.0,
-        "meme_limit_up_max": 2,
-    }
+    keys = (
+        "adx_min",
+        "days_since_peak_min",
+        "days_since_peak_max",
+        "drawdown_atr_min",
+        "drawdown_atr_max",
+        "dryup_ratio_max",
+        "distribution_days_max",
+        "close_vs_ma20_min",
+        "close_vs_ma20_floor",
+        "rv20_repair_min",
+        "rv20_trigger_min",
+        "close_loc_trigger_min",
+    )
+    ctx = {key: TREND_PULLBACK_RULES[key] for key in keys}
+    ctx.update(
+        {
+            "clear_uptrend": CLEAR_UPTREND_RULES.copy(),
+            "state_machine": ("trend", "pullback", "trigger"),
+            "min_price": 5.0,
+            "meme_limit_up_max": 2,
+        }
+    )
+    return ctx
 
 
 # ---------- 止跌形态检测 ----------

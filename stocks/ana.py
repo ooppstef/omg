@@ -1,40 +1,20 @@
 import adata
-import datetime
 import math
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from stocks.stock_models import StockCurrentPrice
 from stocks.industry_models import IndustryConcept
+from stocks.util import finite_float, recent_date
 
-
-def get_recent_date(n):
-    """
-    获取n天前的日期，格式为 'YYYY-MM-DD'
-
-    参数:
-    n (int): 要获取的天数
-
-    返回:
-    str: n天前的日期，格式为 'YYYY-MM-DD'
-    """
-    today = datetime.date.today()
-    target_date = today - datetime.timedelta(days=n)
-    return target_date.strftime("%Y-%m-%d")
-
-
-def _finite_float(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
+get_recent_date = recent_date
+_finite_float = finite_float
 
 
 def east_top_list(top=30, print_result=True):
-    # 东方财富网-数据中心-热门数据-热门数据排行.其实更希望用同花顺的,但库报错.
+    # 东方财富网热门排行（同花顺接口暂不可用）
     res_df = adata.sentiment.hot.pop_rank_100_east()
     stock_current_prices = []
-    for index, row in res_df.iterrows():
+    for _, row in res_df.iterrows():
         stock_current_prices.append(
             StockCurrentPrice(
                 row["stock_code"],
@@ -54,7 +34,7 @@ def east_top_list(top=30, print_result=True):
 def hot_concept_ths(top=8, print_result=True):
     res_df = adata.sentiment.hot.hot_concept_20_ths()
     industry_concepts = []
-    for index, row in res_df.iterrows():
+    for _, row in res_df.iterrows():
         industry_concepts.append(IndustryConcept.from_dict(row))
     industry_concepts = industry_concepts[:top]
     if print_result:
@@ -64,22 +44,19 @@ def hot_concept_ths(top=8, print_result=True):
 
 
 def _calculate_strength_scores(excess_returns, amounts):
-    """
-    计算绝对强度分数（可正可负）
-    公式：绝对强度 = 超额收益 × log(成交额/中位数成交额 + 1)
-    """
+    """绝对强度 = 超额收益 × (1 + log(成交额/中位数成交额 + 1))"""
     median_amount = amounts.median()
     if median_amount == 0:
         median_amount = 1
-    
+
     def calc(excess, amount):
         ratio = amount / median_amount
         multiplier = math.log(ratio + 1) if ratio > 0 else 0
         return round(excess * (1 + multiplier), 2)
-    
+
     return pd.Series(
         [calc(excess_returns[i], amounts[i]) for i in excess_returns.index],
-        index=excess_returns.index
+        index=excess_returns.index,
     )
 
 
@@ -309,7 +286,7 @@ def concept_strength_chart(concept_names, days=10):
         df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
         median_amount = df['amount'].median() or 1
-        
+
         dates, strengths = [], []
         for _, r in df.iterrows():
             date = str(r['trade_date'])[:10]
@@ -324,7 +301,7 @@ def concept_strength_chart(concept_names, days=10):
             strength = excess * (1 + math.log(ratio + 1)) if ratio > 0 else excess
             dates.append(date[-5:])
             strengths.append(round(strength, 2))
-        
+
         if dates:
             all_series[name] = strengths
             series_dates[name] = dates

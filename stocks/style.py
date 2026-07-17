@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
 from typing import Any, Optional
 
 import adata
 import pandas as pd
+
+from stocks.util import env_int
 
 STATE_TECH = "科技虹吸"
 STATE_SMALL = "小盘占优"
@@ -33,17 +34,6 @@ INDEX_META = (
 
 DEFAULT_DAYS = 8
 LOOKBACK_CALENDAR = 120
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
 
 
 def _pct(v: Optional[float]) -> str:
@@ -334,7 +324,7 @@ def print_style_report(
 
 
 def analyze(days: Optional[int] = None) -> dict[str, Any]:
-    n = days if days is not None else _env_int("OMG_STYLE_DAYS", DEFAULT_DAYS)
+    n = days if days is not None else env_int("OMG_STYLE_DAYS", DEFAULT_DAYS)
     print("获取风格指数（adata）...")
     closes = fetch_style_closes()
     for key, code, name in INDEX_META:

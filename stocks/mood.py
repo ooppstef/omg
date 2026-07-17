@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-import os
 from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
+
+from stocks.util import env_int
 
 STATE_ICE = "冰点"
 STATE_REPAIR = "修复"
@@ -26,17 +27,6 @@ STATES = (
 )
 
 DEFAULT_DAYS = 8
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
 
 
 def zhaban_rate(limit_up: int, zhaban: int) -> float:
@@ -244,7 +234,7 @@ def fetch_pools_for_date(trade_date: str) -> dict[str, Any]:
 
 def fetch_mood_history(days: Optional[int] = None) -> list[dict[str, Any]]:
     """拉取近 N 个有涨停池数据的交易日。"""
-    n = days if days is not None else _env_int("OMG_MOOD_DAYS", DEFAULT_DAYS)
+    n = days if days is not None else env_int("OMG_MOOD_DAYS", DEFAULT_DAYS)
     candidates = _recent_calendar_dates(n)
     rows: list[dict[str, Any]] = []
     error_days = 0

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import datetime
 import math
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
 import adata
 import pandas as pd
+
+from stocks.util import env_int, finite_float, fmt_chg
 
 BENCH_CODE = "510300"
 STATE_START = "启动趋势"
@@ -82,17 +83,6 @@ _HORIZON_CFG = {
         "down_alt_ret": -0.03,
     },
 }
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
 
 
 def load_universe(path: Optional[str] = None) -> list[dict]:
@@ -254,12 +244,8 @@ def _num(v: Optional[float], digits: int = 2) -> str:
 
 
 def _feature_number(features: dict, key: str, default: float) -> float:
-    value = features.get(key)
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return number if math.isfinite(number) else default
+    number = finite_float(features.get(key))
+    return default if number is None else number
 
 
 def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
@@ -468,12 +454,6 @@ def classify_etf(
     }
 
 
-def _fmt_chg(chg) -> str:
-    if isinstance(chg, (int, float)) and chg == chg:
-        return f"{chg:+.2f}%"
-    return "-"
-
-
 def build_comment(row: dict) -> str:
     """兼容旧接口：把短线理由拼成一句话。"""
     reasons = row.get("short_reasons") or []
@@ -485,7 +465,7 @@ def build_comment(row: dict) -> str:
             text += f"；中线={mid}"
         chg = row.get("change_pct")
         if isinstance(chg, (int, float)) and chg == chg:
-            text += f"；当日{_fmt_chg(chg)}"
+            text += f"；当日{fmt_chg(chg)}"
         return text
     return "数据不足，暂无点评"
 
@@ -500,7 +480,7 @@ def build_reason_block(row: dict) -> str:
         lines.append("中线理由: " + "；".join(mid_rs[:3]))
     chg = row.get("change_pct")
     if isinstance(chg, (int, float)) and chg == chg:
-        lines.append(f"当日涨跌: {_fmt_chg(chg)}")
+        lines.append(f"当日涨跌: {fmt_chg(chg)}")
     return "\n".join(f"   {x}" for x in lines) if lines else "   理由: 暂无"
 
 
@@ -616,8 +596,8 @@ def scan_etf_states(
     universe_path: Optional[str] = None,
 ) -> list[dict]:
     if workers is None:
-        workers = _env_int("OMG_ETF_WORKERS", DEFAULT_WORKERS)
-    max_n = _env_int("OMG_ETF_MAX", 0) or None
+        workers = env_int("OMG_ETF_WORKERS", DEFAULT_WORKERS)
+    max_n = env_int("OMG_ETF_MAX", 0) or None
 
     universe = load_universe(universe_path)
     if max_n is not None:
@@ -680,7 +660,7 @@ def print_etf_report(rows: list[dict]) -> None:
             print(
                 f"{i}. {r['theme']}  {r['code']} {r['name']}  "
                 f"短线:{r['short_state']} 中线:{r['mid_state']}  "
-                f"涨跌:{_fmt_chg(r.get('change_pct'))} 超额10日:{excess_s}"
+                f"涨跌:{fmt_chg(r.get('change_pct'))} 超额10日:{excess_s}"
             )
             print(build_reason_block(r))
         print()

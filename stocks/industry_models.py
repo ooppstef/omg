@@ -1,31 +1,30 @@
 class IndustryConcept:
     def __init__(self, concept_code, concept_name, change_pct, hot_value, hot_tag):
-        self.concept_code = concept_code  # 概念代码
-        self.concept_name = concept_name  # 概念名称
-        self.change_pct = change_pct  # 涨跌幅（%）
-        self.hot_value = hot_value  # 热度值
-        self.hot_tag = hot_tag  # 热度标签
+        self.concept_code = concept_code
+        self.concept_name = concept_name
+        self.change_pct = change_pct
+        self.hot_value = hot_value
+        self.hot_tag = hot_tag
 
     def __str__(self):
-        # 定义颜色代码
-        RED = "\033[91m"
-        GREEN = "\033[92m"
-        WHITE = "\033[97m"
-        CYAN = "\033[96m"  # 天蓝色
-        RESET = "\033[0m"
-
-        # 根据change_pct的值选择颜色
+        red, green, white, cyan, reset = (
+            "\033[91m",
+            "\033[92m",
+            "\033[97m",
+            "\033[96m",
+            "\033[0m",
+        )
         if self.change_pct > 0:
-            color = RED
+            color = red
         elif self.change_pct < 0:
-            color = GREEN
+            color = green
         else:
-            color = WHITE
+            color = white
 
         return (
             f"{self.concept_name} (代码: {self.concept_code}) - "
-            f"涨跌幅: {color}{self.change_pct}%{RESET}, "
-            f"热度值: {CYAN}{self.hot_value}{RESET}, "
+            f"涨跌幅: {color}{self.change_pct}%{reset}, "
+            f"热度值: {cyan}{self.hot_value}{reset}, "
             f"热度标签: {self.hot_tag}"
         )
 

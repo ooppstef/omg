@@ -48,18 +48,16 @@ def main():
     )
     args = parser.parse_args()
 
+    if not args.k and not args.command:
+        print(f"用法: omg [{'|'.join(COMMANDS)}] 或 omg -k 概念名称")
+        return 2
+
     if args.k:
         import stocks.main as stocks
 
         combined = " ".join(args.k)
         concepts = [c.strip() for c in re.split(r"[,，\s]+", combined) if c.strip()]
         return 0 if stocks.k(concepts) is not False else 1
-
-    if not args.command:
-        print(
-            f"用法: omg [{'|'.join(COMMANDS)}] 或 omg -k 概念名称"
-        )
-        return 2
 
     return 0 if run_command(args.command) is not False else 1
 

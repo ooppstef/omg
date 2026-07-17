@@ -12,9 +12,10 @@ def compute_all(df):
     l = df["low"].values.astype(float)
     v = df["volume"].values.astype(float)
 
+    prev_c = np.roll(c, 1)
+    prev_c[0] = np.nan
+
     if "change_pct" not in df.columns:
-        prev_c = np.roll(c, 1)
-        prev_c[0] = np.nan
         df["change_pct"] = (c / prev_c - 1.0) * 100
 
     # MA: 简单移动平均线，N日收盘价算术平均，反映中短期趋势方向
@@ -36,8 +37,6 @@ def compute_all(df):
     df["natr"] = talib.NATR(h, l, c, timeperiod=14)
 
     # 振幅 (%)
-    prev_c = np.roll(c, 1)
-    prev_c[0] = np.nan
     df["amplitude"] = (h - l) / prev_c * 100
 
     # 日级相对成交量

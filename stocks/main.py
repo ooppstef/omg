@@ -13,7 +13,6 @@ from stocks.filter.algo import STRATEGIES
 
 
 def my_list():
-    # 大盘指数配置
     indexes = [
         ("000001", "上证指数"),
         ("399001", "深证成指"),
@@ -21,7 +20,6 @@ def my_list():
     ]
 
     print("=== 大盘指数 ===")
-    # 并行获取指数数据
     with ThreadPoolExecutor(max_workers=3) as executor:
         results = list(
             executor.map(lambda x: market.get_index_current_price(x[0], x[1]), indexes)
@@ -129,9 +127,7 @@ def filter_menu():
     if ch == "\x1b":
         print("已退出")
         return True
-
-    if ch in STRATEGIES:
-        return stock_filter.run_strategy(ch)
-    else:
+    if ch not in STRATEGIES:
         print("无效选择")
         return False
+    return stock_filter.run_strategy(ch)

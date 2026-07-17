@@ -17,11 +17,6 @@ def dir_path():
     return str(data_file("stocks.db", legacy_path=legacy))
 
 
-def db_init():
-    conn = sqlite3.connect(dir_path())
-    conn.close()
-
-
 def init_table():
     path = dir_path()
     with _INIT_LOCK:
@@ -132,27 +127,21 @@ def get_base_data():
         short = chinese_to_acronym(name)
         stock.insert(2, short)
 
-    # 根据交易所对股票列表进行分类
-    classified_stocks = {"SH": [], "SZ": [], "BJ": []}
+    by_exchange = {"SH": [], "SZ": [], "BJ": []}
     for stock in stock_list:
         exchange = stock[3]
-        if exchange in classified_stocks:
-            classified_stocks[exchange].append(stock)
+        if exchange in by_exchange:
+            by_exchange[exchange].append(stock)
 
-    # 按照SH>SZ>BJ的顺序重新组合股票列表
     sorted_stock_list = []
-    for exchange in ["SH", "SZ", "BJ"]:
-        sorted_stock_list.extend(classified_stocks[exchange])
-
+    for exchange in ("SH", "SZ", "BJ"):
+        sorted_stock_list.extend(by_exchange[exchange])
     return sorted_stock_list
 
 
 def chinese_to_acronym(chinese_str):
-    # 将中文转换为拼音
     pinyin_list = pinyin(chinese_str, style=Style.FIRST_LETTER)
-    # 提取每个字的首字母并连接
-    acronym = "".join(item[0].upper() for item in pinyin_list)
-    return acronym
+    return "".join(item[0].upper() for item in pinyin_list)
 
 
 def search_base_by_code(code):
