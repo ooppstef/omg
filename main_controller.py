@@ -1,5 +1,6 @@
 import argparse
 import re
+import sys
 
 
 COMMAND_META = {
@@ -14,6 +15,7 @@ COMMAND_META = {
     "etf": ("etf", "主题ETF点评"),
     "mood": ("mood", "市场情绪"),
     "style": ("style", "风格结构"),
+    "chat": (None, "AI多轮对话"),
 }
 COMMANDS = tuple(COMMAND_META)
 
@@ -30,7 +32,39 @@ def run_command(command):
     return getattr(stocks, handler_name)()
 
 
+def _run_chat(argv):
+    parser = argparse.ArgumentParser(prog="omg chat", description="AI 多轮对话")
+    parser.add_argument(
+        "--research",
+        action="store_true",
+        help="research 模式（多步取证）",
+    )
+    parser.add_argument("prompt", nargs="*", help="首问（可选）")
+    research = False
+    prompt = []
+    parse_options = True
+    for token in argv:
+        if parse_options and token == "--":
+            parse_options = False
+        elif parse_options and token == "--research":
+            research = True
+        elif parse_options and token in ("-h", "--help"):
+            parser.parse_args(["--help"])
+        elif parse_options and token.startswith("-"):
+            parser.error(f"unrecognized arguments: {token}")
+        else:
+            prompt.append(token)
+
+    from stocks.ai.chat import run as chat_run
+
+    first = " ".join(prompt).strip() or None
+    return chat_run(prompt=first, research=research)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "chat":
+        return _run_chat(sys.argv[2:])
+
     parser = argparse.ArgumentParser(description="基本命令")
     parser.add_argument(
         "command",
@@ -51,6 +85,9 @@ def main():
     if not args.k and not args.command:
         print(f"用法: omg [{'|'.join(COMMANDS)}] 或 omg -k 概念名称")
         return 2
+
+    if args.command == "chat":
+        return _run_chat([])
 
     if args.k:
         import stocks.main as stocks

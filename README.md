@@ -2,7 +2,7 @@
 
 `omg` is a small Python command-line toolkit for tracking and reviewing A-share market data. It focuses on practical daily workflows: watchlists, market heat, announcements, industry rotation, concept strength charts, and local screening.
 
-The project is built around public market data libraries and local files. It does not require a hosted service or account credentials.
+The project is built around public market data libraries and local files. Core commands do not need a hosted account; `omg chat` optionally uses your own OpenAI-compatible LLM API.
 
 ## Features
 
@@ -16,6 +16,7 @@ The project is built around public market data libraries and local files. It doe
 - Plot concept strength curves for one or more concepts.
 - Run local screening helpers.
 - Sync a watchlist section to another local text file through an explicit target path.
+- Chat with an OpenAI-compatible LLM that can call local market tools and web search (`omg chat`).
 
 ## Installation
 
@@ -43,11 +44,25 @@ omg etf
 omg mood
 omg style
 omg filter
+omg chat
+omg chat "今天怎么看"
+omg chat --research
 omg -k 半导体 人工智能
 ```
 
 Run `omg init` once after installation. It creates the local watchlist and
 downloads the stock-name/code index used by name and acronym lookup.
+
+`omg chat` needs an OpenAI-compatible API via environment variables:
+
+```sh
+export OMG_LLM_BASE_URL=https://your-endpoint/v1
+export OMG_LLM_API_KEY=sk-...
+export OMG_LLM_MODEL=your-model
+omg chat
+```
+
+Optional: `OMG_LLM_TIMEOUT`, `OMG_SEARCH_MAX_RESULTS`. Exit with Ctrl-C (or `exit` / `quit`). `--research` raises the tool-call budget and asks the model to gather evidence before concluding.
 
 `omg etf` scans one largest-AUM ETF per theme (~81 names), labels short/mid regime, and prints volume-price commentary. Optional: `OMG_ETF_MAX=20` for a quicker smoke run.
 
