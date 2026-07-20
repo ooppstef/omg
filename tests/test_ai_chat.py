@@ -123,47 +123,11 @@ class TestTools(unittest.TestCase):
         mock_analyze.assert_called_once_with(gainers=10, losers=5)
 
     def test_rank_rejects_excessive_gainers(self):
-        result = ai_tools.call("rank", {"gainers": 101})
+        with patch("stocks.rank.analyze") as mock_analyze:
+            result = ai_tools.call("rank", {"gainers": 101})
         self.assertFalse(result["ok"])
         self.assertIn("gainers", result["error"])
-
-    @patch(
-        "stocks.rank.analyze",
-        return_value={
-            "as_of": "2026-07-20T15:00:00",
-            "universe": "hs_main_cyb_kcb_ex_st",
-            "gainers": [
-                {
-                    "code": "600000",
-                    "name": "浦发银行",
-                    "change_pct": 5.0,
-                    "price": 10.0,
-                    "amount": 1.0,
-                    "turnover": 1.0,
-                    "industry": "银行",
-                    "concepts": ["银行"],
-                }
-            ],
-            "losers": [],
-            "meta": {
-                "gainers_n": 50,
-                "losers_n": 20,
-                "scanned": 100,
-                "filtered": 80,
-                "tag_miss": 0,
-            },
-        },
-    )
-    def test_rank_tool(self, mock_analyze):
-        result = ai_tools.call("rank", {"gainers": 10, "losers": 5})
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["data"]["gainers"][0]["code"], "600000")
-        mock_analyze.assert_called_once_with(gainers=10, losers=5)
-
-    def test_rank_rejects_excessive_gainers(self):
-        result = ai_tools.call("rank", {"gainers": 101})
-        self.assertFalse(result["ok"])
-        self.assertIn("gainers", result["error"])
+        mock_analyze.assert_not_called()
 
     @patch(
         "stocks.mood.analyze",
@@ -564,6 +528,8 @@ class TestSkills(unittest.TestCase):
         self.assertIn("omg-daily-review", names)
         skill = ai_skills.load("omg-daily-review")
         self.assertIn("日复盘", skill["body"])
+        self.assertIn("`rank`", skill["body"])
+        self.assertIn("rank", ai_chat.SYSTEM)
 
     def test_resolve_auto_from_prompt(self):
         from stocks.ai import skills as ai_skills

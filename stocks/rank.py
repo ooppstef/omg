@@ -121,17 +121,23 @@ def _fetch_spot() -> pd.DataFrame:
             part = fn()
             if part is not None and not part.empty:
                 frames.append(part)
+            else:
+                errors.append(f"{label}:empty")
         except Exception as exc:
             errors.append(f"{label}:{exc}")
-    if frames:
+    if len(frames) == 2:
         return pd.concat(frames, ignore_index=True)
+    # 单侧成功不静默半市场：先兜底全市场，再失败
     try:
         whole = ak.stock_zh_a_spot_em()
     except Exception as exc:
-        raise ValueError(f"拉取现货失败: {exc}; 分市场错误={errors}") from exc
-    if whole is None or whole.empty:
-        raise ValueError(f"拉取现货为空; 分市场错误={errors}")
-    return whole
+        errors.append(f"all:{exc}")
+        whole = None
+    if whole is not None and not whole.empty:
+        return whole
+    raise ValueError(
+        f"拉取现货失败（分市场完整度 {len(frames)}/2）: {errors}"
+    )
 
 
 def _row_payload(
@@ -176,59 +182,78 @@ def _live_industry_by_code(needed: set[str]) -> dict[str, Optional[str]]:
         return {}
     from stocks import crowd
 
-    industries = crowd.list_industries()
-    if industries is None or industries.empty:
+    em = crowd._list_em_industries()
+    if not em:
         return {code: None for code in needed}
 
-    hits: dict[str, set[str]] = {code: set() for code in needed}
-
-    def one(row) -> None:
-        bk = str(row.get("code") or "").strip()
-        name = str(row.get("name") or "").strip()
-        if not bk or not name:
-            return
+    def one(item: tuple[str, str]) -> dict[str, set[str]]:
+        name, bk = item
+        local: dict[str, set[str]] = {}
         for code, _stock_name in crowd._fetch_em_constituents(bk):
             code = str(code).strip()
-            if code in hits:
-                hits[code].add(name)
+            if code in needed:
+                local.setdefault(code, set()).add(name)
+        return local
 
-    rows = list(industries.to_dict(orient="records"))
+    merged: dict[str, set[str]] = {code: set() for code in needed}
     with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(one, rows))
+        for partial in pool.map(one, list(em.items())):
+            for code, names in partial.items():
+                merged[code].update(names)
 
-    out: dict[str, Optional[str]] = {}
-    for code in needed:
-        names = hits.get(code) or set()
-        out[code] = sorted(names)[0] if names else None
-    return out
+    return {
+        code: (sorted(names)[0] if names else None)
+        for code, names in merged.items()
+    }
 
 
 def _live_hot_concept_names(top: int = HOT_CONCEPT_TOP) -> list[str]:
     from stocks import ana
 
+    # 优先同花顺热概念（轻量）；强度 Top 作回退，避免每次 rank 全量重算 hot
+    try:
+        concepts = ana.hot_concept_ths(top=top, print_result=False) or []
+        names = [
+            str(getattr(c, "concept_name", None) or getattr(c, "name", "") or "")
+            for c in concepts
+        ]
+        names = [n for n in names if n]
+        if names:
+            return names[:top]
+    except Exception:
+        pass
     daily = ana.concept_strength_top10(days=5, top=top, print_result=False)
     if isinstance(daily, dict) and daily:
         latest = max(daily.keys())
         return [str(name) for name, _score in daily[latest][:top]]
-    try:
-        concepts = ana.hot_concept_ths(top=top, print_result=False) or []
-        return [str(getattr(c, "name", c)) for c in concepts][:top]
-    except Exception:
-        return []
+    return []
 
 
 def _live_concepts_by_code(
-    hot_names: list[str], needed: set[str]
+    hot_names: list[str],
+    needed: set[str],
+    *,
+    concept_df: Optional[pd.DataFrame] = None,
+    fetch_constituent=None,
 ) -> dict[str, list[str]]:
     if not hot_names or not needed:
         return {code: [] for code in needed}
 
-    import adata
+    if concept_df is None or fetch_constituent is None:
+        import adata
 
-    try:
-        concept_df = adata.stock.info.all_concept_code_ths()
-    except Exception:
-        return {code: [] for code in needed}
+        if concept_df is None:
+            try:
+                concept_df = adata.stock.info.all_concept_code_ths()
+            except Exception:
+                return {code: [] for code in needed}
+        if fetch_constituent is None:
+            fetch_constituent = (
+                lambda index_code: adata.stock.info.concept_constituent_ths(
+                    index_code=index_code
+                )
+            )
+
     if concept_df is None or concept_df.empty:
         return {code: [] for code in needed}
 
@@ -245,7 +270,7 @@ def _live_concepts_by_code(
     def fetch(pair: tuple[str, str]) -> tuple[str, set[str]]:
         name, index_code = pair
         try:
-            df = adata.stock.info.concept_constituent_ths(index_code=index_code)
+            df = fetch_constituent(index_code)
         except Exception:
             return name, set()
         if df is None or df.empty or "stock_code" not in df.columns:

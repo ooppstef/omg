@@ -1,6 +1,7 @@
 """stocks.rank 单元测试（mock 现货，不打网络）。"""
 
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -217,6 +218,101 @@ class TestRankAnalyze(unittest.TestCase):
         self.assertEqual(data["meta"]["losers_n"], 20)
         self.assertEqual(data["gainers"][0]["code"], "600000")
         self.assertEqual(data["losers"][0]["code"], "600001")
+
+    def test_fetch_spot_partial_falls_back_to_whole(self):
+        sh = _spot_rows(
+            [
+                {
+                    "代码": "600000",
+                    "名称": "甲",
+                    "涨跌幅": 1.0,
+                    "最新价": 10.0,
+                    "成交额": 1.0,
+                    "换手率": 1.0,
+                }
+            ]
+        )
+        whole = _spot_rows(
+            [
+                {
+                    "代码": "600000",
+                    "名称": "甲",
+                    "涨跌幅": 1.0,
+                    "最新价": 10.0,
+                    "成交额": 1.0,
+                    "换手率": 1.0,
+                },
+                {
+                    "代码": "000001",
+                    "名称": "乙",
+                    "涨跌幅": -1.0,
+                    "最新价": 10.0,
+                    "成交额": 1.0,
+                    "换手率": 1.0,
+                },
+            ]
+        )
+        with patch("akshare.stock_sh_a_spot_em", return_value=sh):
+            with patch(
+                "akshare.stock_sz_a_spot_em", side_effect=RuntimeError("sz down")
+            ):
+                with patch(
+                    "akshare.stock_zh_a_spot_em", return_value=whole
+                ) as mock_all:
+                    out = rank._fetch_spot()
+        mock_all.assert_called_once()
+        self.assertEqual(len(out), 2)
+
+    def test_fetch_spot_rejects_half_market_without_fallback(self):
+        sh = _spot_rows(
+            [
+                {
+                    "代码": "600000",
+                    "名称": "甲",
+                    "涨跌幅": 1.0,
+                    "最新价": 10.0,
+                    "成交额": 1.0,
+                    "换手率": 1.0,
+                }
+            ]
+        )
+        with patch("akshare.stock_sh_a_spot_em", return_value=sh):
+            with patch(
+                "akshare.stock_sz_a_spot_em", side_effect=RuntimeError("sz down")
+            ):
+                with patch(
+                    "akshare.stock_zh_a_spot_em", side_effect=RuntimeError("all down")
+                ):
+                    with self.assertRaises(ValueError):
+                        rank._fetch_spot()
+
+    def test_live_concepts_follow_hot_name_order(self):
+        hot = ["机器人", "半导体", "人工智能"]
+        needed = {"600000", "600001"}
+
+        def fake_constituent(index_code):
+            mapping = {
+                "C1": pd.DataFrame({"stock_code": ["600000"]}),
+                "C2": pd.DataFrame({"stock_code": ["600000", "600001"]}),
+                "C3": pd.DataFrame({"stock_code": ["600000"]}),
+            }
+            return mapping[index_code]
+
+        concept_df = pd.DataFrame(
+            [
+                {"name": "机器人", "index_code": "C1"},
+                {"name": "半导体", "index_code": "C2"},
+                {"name": "人工智能", "index_code": "C3"},
+            ]
+        )
+        cons = rank._live_concepts_by_code(
+            hot,
+            needed,
+            concept_df=concept_df,
+            fetch_constituent=fake_constituent,
+        )
+        self.assertEqual(cons["600000"], ["机器人", "半导体", "人工智能"])
+        self.assertEqual(cons["600001"], ["半导体"])
 
 
 if __name__ == "__main__":
