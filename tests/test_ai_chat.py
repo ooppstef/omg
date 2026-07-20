@@ -13,12 +13,13 @@ from stocks.ai.llm import ConfigError, client, settings
 
 class TestLlmConfig(unittest.TestCase):
     def test_settings_requires_env(self):
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"OMG_DISABLE_DOTENV": "1"}, clear=True):
             with self.assertRaises(ConfigError):
                 settings()
 
     def test_settings_ok(self):
         env = {
+            "OMG_DISABLE_DOTENV": "1",
             "OMG_LLM_BASE_URL": "https://example.com/v1",
             "OMG_LLM_API_KEY": "sk-test",
             "OMG_LLM_MODEL": "demo",
@@ -31,6 +32,7 @@ class TestLlmConfig(unittest.TestCase):
 
     def test_settings_rejects_excessive_timeout(self):
         env = {
+            "OMG_DISABLE_DOTENV": "1",
             "OMG_LLM_BASE_URL": "https://example.com/v1",
             "OMG_LLM_API_KEY": "sk-test",
             "OMG_LLM_MODEL": "demo",
@@ -42,6 +44,7 @@ class TestLlmConfig(unittest.TestCase):
 
     def test_settings_rejects_invalid_timeout(self):
         env = {
+            "OMG_DISABLE_DOTENV": "1",
             "OMG_LLM_BASE_URL": "https://example.com/v1",
             "OMG_LLM_API_KEY": "sk-test",
             "OMG_LLM_MODEL": "demo",
@@ -54,6 +57,7 @@ class TestLlmConfig(unittest.TestCase):
     @patch("openai.OpenAI")
     def test_client_disables_sdk_retries(self, mock_openai):
         env = {
+            "OMG_DISABLE_DOTENV": "1",
             "OMG_LLM_BASE_URL": "https://example.com/v1",
             "OMG_LLM_API_KEY": "sk-test",
             "OMG_LLM_MODEL": "demo",
@@ -424,11 +428,18 @@ class TestCliChat(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main_controller.main()
 
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(os.environ, {"OMG_DISABLE_DOTENV": "1"}, clear=True)
     def test_chat_missing_config_nonzero(self):
         with patch("sys.argv", ["omg", "chat"]):
             code = main_controller.main()
         self.assertEqual(code, 1)
+
+    @patch("stocks.ai.chat.ask_once", return_value="结论：冰点")
+    @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
+    def test_run_once_returns_assistant_text(self, _client, _ask):
+        self.assertEqual(ai_chat.run_once("今天怎么看", research=True), "结论：冰点")
+        _ask.assert_called_once()
+        self.assertTrue(_ask.call_args.kwargs.get("research"))
 
 
 if __name__ == "__main__":

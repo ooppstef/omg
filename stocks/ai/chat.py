@@ -12,6 +12,8 @@ from stocks.ai.llm import ConfigError, client as llm_client
 HISTORY_KEEP = 20
 MAX_TOOLS = 8
 MAX_TOOLS_RESEARCH = 16
+# 推理模型会占用大量 completion tokens；过小会导致正文为空
+MAX_COMPLETION_TOKENS = 8192
 
 SYSTEM = """你是 A 股行情助手，运行在 omg chat 中。
 规则：
@@ -74,13 +76,23 @@ def _parse_args(raw: str | None) -> tuple[dict | None, str | None]:
     return args, None
 
 
+def _message_text(msg) -> str:
+    text = (msg.content or "").strip()
+    if text:
+        return text
+    # 部分推理模型可能把草稿放在 reasoning_content
+    reasoning = getattr(msg, "reasoning_content", None)
+    return (reasoning or "").strip()
+
+
 def _final_text(oai, model: str, messages: list[dict]) -> str:
     resp = oai.chat.completions.create(
         model=model,
         messages=trim_messages(messages),
+        max_tokens=MAX_COMPLETION_TOKENS,
     )
     final = resp.choices[0].message
-    text = (final.content or "").strip()
+    text = _message_text(final)
     messages.append(_assistant_message(final))
     return text
 
@@ -106,10 +118,11 @@ def ask_once(
             model=model,
             messages=messages,
             tools=tool_schemas,
+            max_tokens=MAX_COMPLETION_TOKENS,
         )
         msg = resp.choices[0].message
         if not msg.tool_calls:
-            text = (msg.content or "").strip()
+            text = _message_text(msg)
             messages.append(_assistant_message(msg))
             return text
 
@@ -138,10 +151,28 @@ def ask_once(
             return _final_text(oai, model, messages)
 
 
+def _bootstrap(research: bool) -> tuple[object, str, list[dict]]:
+    oai, model = llm_client()
+    messages: list[dict] = [{"role": "system", "content": SYSTEM}]
+    if research:
+        messages.append({"role": "system", "content": SYSTEM_RESEARCH})
+    return oai, model, messages
+
+
+def run_once(prompt: str, *, research: bool = False) -> str:
+    """单轮非交互：返回助手最终文本。配置错误抛 ConfigError。"""
+    text = (prompt or "").strip()
+    if not text:
+        raise ValueError("prompt 不能为空")
+    oai, model, messages = _bootstrap(research)
+    messages.append({"role": "user", "content": text})
+    return ask_once(oai, model, messages, research=research)
+
+
 def run(prompt: Optional[str] = None, research: bool = False) -> int:
     """交互 REPL。Ctrl-C → 0；配置错误 → 1。"""
     try:
-        oai, model = llm_client()
+        oai, model, messages = _bootstrap(research)
     except KeyboardInterrupt:
         print()
         return 0
@@ -151,10 +182,6 @@ def run(prompt: Optional[str] = None, research: bool = False) -> int:
     except Exception as e:
         print(f"LLM 初始化失败: {e}", file=sys.stderr)
         return 1
-
-    messages: list[dict] = [{"role": "system", "content": SYSTEM}]
-    if research:
-        messages.append({"role": "system", "content": SYSTEM_RESEARCH})
 
     mode = "research" if research else "normal"
     print(f"omg chat（{mode}）· Ctrl-C 退出 · model={model}")

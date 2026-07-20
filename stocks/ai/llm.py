@@ -3,10 +3,44 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+_ENV_LOADED = False
 
 
 class ConfigError(RuntimeError):
     """LLM 配置缺失或无效。"""
+
+
+def _load_dotenv() -> None:
+    """加载仓库根目录 .env；已存在的环境变量优先，不被覆盖。"""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    _ENV_LOADED = True
+    # 测试或显式禁用时跳过，避免 clear=True 后被 .env 重新注入
+    if (os.getenv("OMG_DISABLE_DOTENV") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+    path = Path(__file__).resolve().parents[2] / ".env"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("'").strip('"')
 
 
 def _require(name: str) -> str:
@@ -19,6 +53,7 @@ def _require(name: str) -> str:
 
 
 def settings() -> dict:
+    _load_dotenv()
     raw_timeout = (os.getenv("OMG_LLM_TIMEOUT") or "60").strip()
     try:
         timeout = int(raw_timeout)
