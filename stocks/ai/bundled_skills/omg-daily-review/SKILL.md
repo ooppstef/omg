@@ -58,6 +58,7 @@ print(answer)
 
 按需调用：`mood` / `style` / `rot` / `crowd` / `etf` / `hot` / `list` / `rank`；突发新闻再 `web_search`。
 只用成功返回的数据；失败记「数据缺口」。禁止 `filter`。
+`rank`：默认涨幅 Top50 + 跌幅 Top20，含行业/热点概念标签；只摘主题归类，勿倾倒全表。
 
 ## 综合规则
 
