@@ -435,17 +435,18 @@ def _fetch_stocks(code, top_n):
 
     # 只保留沪深主板/创业板/科创板，排除ST
     valid_prefixes = ("600", "00", "300", "688")
-    codes = []
-    for c in df["stock_code"].tolist():
-        if str(c).startswith(valid_prefixes):
-            codes.append(c)
+    codes = [
+        code
+        for code in df["stock_code"].tolist()
+        if str(code).startswith(valid_prefixes)
+    ]
 
     all_perfs = _get_stock_perf(codes)
-    perfs = []
-    for p in all_perfs:
-        name = str(p.get("name", "")).upper()
-        if "ST" not in name:
-            perfs.append(p)
+    perfs = [
+        perf
+        for perf in all_perfs
+        if "ST" not in str(perf.get("name", "")).upper()
+    ]
     feat = stock_confirm(pd.DataFrame(perfs))
     perfs.sort(key=lambda x: x.get("change_pct", 0.0), reverse=True)
     return feat, perfs[:top_n]

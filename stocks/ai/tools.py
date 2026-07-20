@@ -87,9 +87,8 @@ def _int_arg(args: dict, name: str, default: int, maximum: int) -> int:
 def _quiet():
     """工具执行时吞掉模块内 print，避免刷屏 REPL。"""
     buf = io.StringIO()
-    with _STDOUT_LOCK:
-        with contextlib.redirect_stdout(buf):
-            yield
+    with _STDOUT_LOCK, contextlib.redirect_stdout(buf):
+        yield
 
 
 def _tool_mood(args: dict) -> dict:

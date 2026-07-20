@@ -182,10 +182,7 @@ def _parse(text: str) -> tuple[dict[str, str], str]:
             name, _, rest = line.partition(":")
             key = name.strip()
             rest = rest.strip()
-            if rest == ">":
-                buf = []
-            else:
-                buf = [rest] if rest else []
+            buf = [] if rest in {"", ">"} else [rest]
         elif key is not None:
             buf.append(line.strip())
     if key is not None:

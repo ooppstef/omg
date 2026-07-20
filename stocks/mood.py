@@ -193,17 +193,13 @@ def _import_ak():
     return ak
 
 
-def _yyyymmdd(d: date) -> str:
-    return d.strftime("%Y%m%d")
-
-
 def _recent_calendar_dates(n: int) -> list[str]:
     """多取日历日，后续用有数据的交易日截取。"""
     today = date.today()
-    out: list[str] = []
-    for i in range(n * 3 + 5):
-        out.append(_yyyymmdd(today - timedelta(days=i)))
-    return out
+    return [
+        (today - timedelta(days=i)).strftime("%Y%m%d")
+        for i in range(n * 3 + 5)
+    ]
 
 
 def fetch_pools_for_date(trade_date: str) -> dict[str, Any]:

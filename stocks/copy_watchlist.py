@@ -8,10 +8,6 @@ from stocks.paths import temporary_path_for
 TARGET_ENV_NAME = "OMG_COPY_TARGET_PATH"
 
 
-def _default_source_path():
-    return my_list_path()
-
-
 def extract_section_lines(content, section_name):
     lines = content.splitlines()
     current_section = None
@@ -45,7 +41,7 @@ def _render_watchlist(lines, section_name="自选"):
 
 
 def sync_watchlist(source_path=None, target_path=None, section_name="自选"):
-    source = Path(source_path) if source_path is not None else _default_source_path()
+    source = Path(source_path) if source_path is not None else my_list_path()
     target_value = target_path or os.getenv(TARGET_ENV_NAME)
     if not target_value:
         raise ValueError(f"请通过 {TARGET_ENV_NAME} 环境变量或 target_path 参数指定同步目标文件")

@@ -220,8 +220,7 @@ def fetch_index_close(index_code: str, start_date: str) -> pd.Series:
     frame[date_col] = frame[date_col].astype(str).str[:10]
     close = pd.to_numeric(frame["close"], errors="coerce")
     series = pd.Series(close.values, index=pd.to_datetime(frame[date_col]))
-    series = series[~series.index.duplicated(keep="last")].sort_index().dropna()
-    return series
+    return series[~series.index.duplicated(keep="last")].sort_index().dropna()
 
 
 def fetch_style_closes(calendar_days: int = LOOKBACK_CALENDAR) -> dict[str, pd.Series]:
@@ -235,14 +234,10 @@ def fetch_style_closes(calendar_days: int = LOOKBACK_CALENDAR) -> dict[str, pd.S
     return out
 
 
-def _daily_rets(frame: pd.DataFrame) -> pd.DataFrame:
-    return frame.pct_change()
-
-
 def build_trend_rows(frame: pd.DataFrame, days: int) -> list[dict[str, Any]]:
     if frame is None or frame.empty:
         return []
-    rets = _daily_rets(frame).dropna(how="all")
+    rets = frame.pct_change().dropna(how="all")
     tail = rets.tail(days)
     rows = []
     for ts, row in tail.iterrows():
