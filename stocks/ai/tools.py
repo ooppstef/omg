@@ -232,6 +232,18 @@ def _tool_web_search(args: dict) -> dict:
     return _ok(data)
 
 
+def _tool_rank(args: dict) -> dict:
+    import stocks.rank as rank
+
+    gainers = _int_arg(args, "gainers", rank.DEFAULT_GAINERS, rank.MAX_GAINERS)
+    losers = _int_arg(args, "losers", rank.DEFAULT_LOSERS, rank.MAX_LOSERS)
+    with _quiet():
+        data = rank.analyze(gainers=gainers, losers=losers)
+    if not data or (not data.get("gainers") and not data.get("losers")):
+        return _err("无可用涨跌幅榜数据")
+    return _ok(data)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "mood": _tool_mood,
     "style": _tool_style,
@@ -240,6 +252,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "etf": _tool_etf,
     "hot": _tool_hot,
     "list": _tool_list,
+    "rank": _tool_rank,
     "web_search": _tool_web_search,
 }
 
@@ -368,6 +381,30 @@ def schemas() -> list[dict]:
                 "name": "list",
                 "description": "主要指数与自选股实时快照",
                 "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rank",
+                "description": "个股涨幅 Top / 跌幅 Top（含行业与热点概念标签）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "gainers": {
+                            "type": "integer",
+                            "description": "涨幅榜条数，默认 50",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
+                        "losers": {
+                            "type": "integer",
+                            "description": "跌幅榜条数，默认 20",
+                            "minimum": 1,
+                            "maximum": 50,
+                        },
+                    },
+                },
             },
         },
         {

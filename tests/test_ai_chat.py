@@ -75,7 +75,7 @@ class TestTools(unittest.TestCase):
         names = {s["function"]["name"] for s in ai_tools.schemas()}
         self.assertEqual(
             names,
-            {"mood", "style", "rot", "crowd", "etf", "hot", "list", "web_search"},
+            {"mood", "style", "rot", "crowd", "etf", "hot", "list", "rank", "web_search"},
         )
 
     def test_unknown_tool(self):
@@ -88,6 +88,82 @@ class TestTools(unittest.TestCase):
         result = ai_tools.call("mood", {"days": 5})
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"][0]["state"], "主升")
+
+    @patch(
+        "stocks.rank.analyze",
+        return_value={
+            "as_of": "2026-07-20T15:00:00",
+            "universe": "hs_main_cyb_kcb_ex_st",
+            "gainers": [
+                {
+                    "code": "600000",
+                    "name": "浦发银行",
+                    "change_pct": 5.0,
+                    "price": 10.0,
+                    "amount": 1.0,
+                    "turnover": 1.0,
+                    "industry": "银行",
+                    "concepts": ["银行"],
+                }
+            ],
+            "losers": [],
+            "meta": {
+                "gainers_n": 50,
+                "losers_n": 20,
+                "scanned": 100,
+                "filtered": 80,
+                "tag_miss": 0,
+            },
+        },
+    )
+    def test_rank_tool(self, mock_analyze):
+        result = ai_tools.call("rank", {"gainers": 10, "losers": 5})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["gainers"][0]["code"], "600000")
+        mock_analyze.assert_called_once_with(gainers=10, losers=5)
+
+    def test_rank_rejects_excessive_gainers(self):
+        result = ai_tools.call("rank", {"gainers": 101})
+        self.assertFalse(result["ok"])
+        self.assertIn("gainers", result["error"])
+
+    @patch(
+        "stocks.rank.analyze",
+        return_value={
+            "as_of": "2026-07-20T15:00:00",
+            "universe": "hs_main_cyb_kcb_ex_st",
+            "gainers": [
+                {
+                    "code": "600000",
+                    "name": "浦发银行",
+                    "change_pct": 5.0,
+                    "price": 10.0,
+                    "amount": 1.0,
+                    "turnover": 1.0,
+                    "industry": "银行",
+                    "concepts": ["银行"],
+                }
+            ],
+            "losers": [],
+            "meta": {
+                "gainers_n": 50,
+                "losers_n": 20,
+                "scanned": 100,
+                "filtered": 80,
+                "tag_miss": 0,
+            },
+        },
+    )
+    def test_rank_tool(self, mock_analyze):
+        result = ai_tools.call("rank", {"gainers": 10, "losers": 5})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["gainers"][0]["code"], "600000")
+        mock_analyze.assert_called_once_with(gainers=10, losers=5)
+
+    def test_rank_rejects_excessive_gainers(self):
+        result = ai_tools.call("rank", {"gainers": 101})
+        self.assertFalse(result["ok"])
+        self.assertIn("gainers", result["error"])
 
     @patch(
         "stocks.mood.analyze",
