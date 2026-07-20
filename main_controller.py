@@ -33,32 +33,77 @@ def run_command(command):
 
 
 def _run_chat(argv):
-    parser = argparse.ArgumentParser(prog="omg chat", description="AI 多轮对话")
+    parser = argparse.ArgumentParser(
+        prog="omg chat",
+        description="AI 多轮对话（可加载 .cursor/skills 下的 SKILL.md）",
+    )
     parser.add_argument(
         "--research",
         action="store_true",
         help="research 模式（多步取证）",
     )
+    parser.add_argument(
+        "--skill",
+        metavar="NAME",
+        help="启用 skill（如 omg-daily-review）；也可用 --list-skills 查看",
+    )
+    parser.add_argument(
+        "--list-skills",
+        action="store_true",
+        help="列出可用 skill 后退出",
+    )
     parser.add_argument("prompt", nargs="*", help="首问（可选）")
+
     research = False
+    skill = None
+    list_skills = False
     prompt = []
     parse_options = True
-    for token in argv:
+    tokens = list(argv)
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
         if parse_options and token == "--":
             parse_options = False
         elif parse_options and token == "--research":
             research = True
+        elif parse_options and token == "--list-skills":
+            list_skills = True
+        elif parse_options and token == "--skill":
+            if i + 1 >= len(tokens) or tokens[i + 1].startswith("-"):
+                parser.error("--skill 需要名称，例如 --skill omg-daily-review")
+            skill = tokens[i + 1]
+            i += 1
+        elif parse_options and token.startswith("--skill="):
+            skill = token.split("=", 1)[1].strip() or None
+            if not skill:
+                parser.error("--skill 需要名称")
         elif parse_options and token in ("-h", "--help"):
             parser.parse_args(["--help"])
         elif parse_options and token.startswith("-"):
             parser.error(f"unrecognized arguments: {token}")
         else:
             prompt.append(token)
+        i += 1
+
+    if list_skills:
+        from stocks.ai import skills as ai_skills
+
+        rows = ai_skills.list_skills()
+        if not rows:
+            print("未找到 skill（期望目录 .cursor/skills/*/SKILL.md）")
+            return 1
+        for row in rows:
+            desc = row["description"]
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            print(f"{row['name']}\t{desc}")
+        return 0
 
     from stocks.ai.chat import run as chat_run
 
     first = " ".join(prompt).strip() or None
-    return chat_run(prompt=first, research=research)
+    return chat_run(prompt=first, research=research, skill=skill)
 
 
 def main():

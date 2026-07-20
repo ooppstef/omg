@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import types
@@ -401,20 +402,37 @@ class TestCliChat(unittest.TestCase):
         with patch("sys.argv", ["omg", "chat", "今天怎么看", "--research"]):
             code = main_controller.main()
         self.assertEqual(code, 0)
-        mock_run.assert_called_once_with(prompt="今天怎么看", research=True)
+        mock_run.assert_called_once_with(
+            prompt="今天怎么看", research=True, skill=None
+        )
 
     @patch("stocks.ai.chat.run", return_value=0)
     def test_main_chat_research_before_prompt(self, mock_run):
         with patch("sys.argv", ["omg", "chat", "--research", "今天怎么看"]):
             code = main_controller.main()
         self.assertEqual(code, 0)
-        mock_run.assert_called_once_with(prompt="今天怎么看", research=True)
+        mock_run.assert_called_once_with(
+            prompt="今天怎么看", research=True, skill=None
+        )
+
+    @patch("stocks.ai.chat.run", return_value=0)
+    def test_main_chat_with_skill(self, mock_run):
+        with patch(
+            "sys.argv",
+            ["omg", "chat", "--research", "--skill", "omg-daily-review", "复盘"],
+        ):
+            self.assertEqual(main_controller.main(), 0)
+        mock_run.assert_called_once_with(
+            prompt="复盘", research=True, skill="omg-daily-review"
+        )
 
     @patch("stocks.ai.chat.run", return_value=0)
     def test_chat_double_dash_keeps_option_like_prompt(self, mock_run):
         with patch("sys.argv", ["omg", "chat", "--", "--research", "-k"]):
             self.assertEqual(main_controller.main(), 0)
-        mock_run.assert_called_once_with(prompt="--research -k", research=False)
+        mock_run.assert_called_once_with(
+            prompt="--research -k", research=False, skill=None
+        )
 
     @patch("stocks.ai.chat.run", return_value=0)
     def test_chat_rejects_global_k_option(self, mock_run):
@@ -440,6 +458,165 @@ class TestCliChat(unittest.TestCase):
         self.assertEqual(ai_chat.run_once("今天怎么看", research=True), "结论：冰点")
         _ask.assert_called_once()
         self.assertTrue(_ask.call_args.kwargs.get("research"))
+
+
+class TestSkills(unittest.TestCase):
+    def test_list_and_load_daily_review(self):
+        from stocks.ai import skills as ai_skills
+
+        names = {s["name"] for s in ai_skills.list_skills()}
+        self.assertIn("omg-daily-review", names)
+        skill = ai_skills.load("omg-daily-review")
+        self.assertIn("日复盘", skill["body"])
+
+    def test_resolve_auto_from_prompt(self):
+        from stocks.ai import skills as ai_skills
+
+        for prompt in ("帮我复盘一下今天", "做个日复盘", "今日复盘", "做个复盘"):
+            skill = ai_skills.resolve(None, prompt)
+            self.assertIsNotNone(skill, prompt)
+            self.assertEqual(skill["name"], "omg-daily-review", prompt)
+
+    def test_resolve_avoids_false_positives(self):
+        from stocks.ai import skills as ai_skills
+
+        self.assertIsNone(ai_skills.resolve(None, "复盘"))
+        self.assertIsNone(ai_skills.resolve(None, "别深挖细节，今天大盘怎么样"))
+        self.assertIsNone(ai_skills.resolve(None, "简单说说盘面就行"))
+        self.assertIsNone(ai_skills.resolve(None, "用 research 模式随便聊聊"))
+        self.assertIsNone(ai_skills.resolve(None, "前日复盘已经写了"))
+        self.assertIsNone(ai_skills.resolve(None, "昨日复盘已经写了"))
+        self.assertIsNone(ai_skills.resolve(None, "请做多日复盘总结"))
+        self.assertIsNone(ai_skills.resolve(None, "两日复盘对比一下"))
+        self.assertIsNone(ai_skills.resolve(None, "找个板块研究员聊聊"))
+        self.assertIsNone(ai_skills.resolve(None, "我想深挖一下主题性机会"))
+        self.assertIsNone(ai_skills.resolve(None, "别帮我复盘了"))
+        self.assertIsNone(ai_skills.resolve(None, "别再帮我复盘了"))
+        self.assertIsNone(ai_skills.resolve(None, "不要再复盘一下"))
+        self.assertIsNone(ai_skills.resolve(None, "不需要复盘一下"))
+        self.assertIsNone(ai_skills.resolve(None, "今日复盘已经写了"))
+        self.assertIsNone(ai_skills.resolve(None, "深挖一下这个主题性机会"))
+        # 复合词里的「别/不是」不应误判为否定
+        self.assertEqual(
+            ai_skills.resolve(None, "特别帮我复盘一下")["name"],
+            "omg-daily-review",
+        )
+        self.assertEqual(
+            ai_skills.resolve(None, "是不是做个复盘")["name"],
+            "omg-daily-review",
+        )
+
+    def test_resolve_negated_theme_falls_through_to_daily(self):
+        from stocks.ai import skills as ai_skills
+
+        skill = ai_skills.resolve(None, "不要主题研究了，帮我复盘一下今天")
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill["name"], "omg-daily-review")
+
+    def test_theme_beats_daily_when_theme_phrase_present(self):
+        from stocks.ai import skills as ai_skills
+
+        skill = ai_skills.resolve(None, "主题研究一下今天的盘面")
+        self.assertEqual(skill["name"], "omg-theme-research")
+
+    def test_resolve_theme_spoken_variants(self):
+        from stocks.ai import skills as ai_skills
+
+        for prompt in (
+            "深挖板块 半导体",
+            "深挖一下板块 半导体",
+            "深挖一下主题 人形机器人",
+            "深挖一下这个主题",
+        ):
+            skill = ai_skills.resolve(None, prompt)
+            self.assertIsNotNone(skill, prompt)
+            self.assertEqual(skill["name"], "omg-theme-research", prompt)
+
+    def test_load_unknown_skill_raises(self):
+        from stocks.ai import skills as ai_skills
+        from stocks.ai.skills import SkillError
+
+        with self.assertRaises(SkillError):
+            ai_skills.load("no-such-skill")
+
+    @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
+    def test_run_once_unknown_skill_raises(self, _client):
+        from stocks.ai.skills import SkillError
+
+        with self.assertRaises(SkillError):
+            ai_chat.run_once("随便问", skill="no-such-skill")
+
+    @patch("stocks.ai.chat.ask_once", return_value="ok")
+    @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
+    def test_run_once_auto_theme_enables_research(self, _client, mock_ask):
+        ai_chat.run_once("深挖一下板块 半导体", research=False)
+        self.assertTrue(mock_ask.call_args.kwargs.get("research"))
+        messages = mock_ask.call_args.args[2]
+        self.assertTrue(
+            any(
+                "omg-theme-research" in (m.get("content") or "")
+                for m in messages
+                if m.get("role") == "system"
+            )
+        )
+
+    @patch("stocks.ai.chat.run")
+    def test_main_chat_list_skills(self, mock_run):
+        buf = io.StringIO()
+        with patch("sys.argv", ["omg", "chat", "--list-skills"]):
+            with patch("sys.stdout", buf):
+                code = main_controller.main()
+        self.assertEqual(code, 0)
+        mock_run.assert_not_called()
+        self.assertIn("omg-daily-review", buf.getvalue())
+        self.assertIn("omg-theme-research", buf.getvalue())
+
+    @patch("stocks.ai.chat.run", return_value=0)
+    def test_main_chat_skill_equals_form(self, mock_run):
+        with patch(
+            "sys.argv",
+            ["omg", "chat", "--skill=omg-daily-review", "做个复盘"],
+        ):
+            self.assertEqual(main_controller.main(), 0)
+        mock_run.assert_called_once_with(
+            prompt="做个复盘", research=False, skill="omg-daily-review"
+        )
+
+    @patch("stocks.ai.chat.ask_once", return_value="ok")
+    @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
+    def test_run_once_injects_skill_system(self, _client, mock_ask):
+        ai_chat.run_once("随便问", research=False, skill="omg-daily-review")
+        messages = mock_ask.call_args.args[2]
+        skill_msgs = [
+            m
+            for m in messages
+            if m.get("role") == "system" and "omg-daily-review" in (m.get("content") or "")
+        ]
+        self.assertTrue(skill_msgs)
+        self.assertTrue(mock_ask.call_args.kwargs.get("research"))
+        self.assertTrue(
+            any(
+                m.get("content") == ai_chat.SYSTEM_RESEARCH
+                for m in messages
+                if m.get("role") == "system"
+            )
+        )
+
+    @patch("stocks.ai.chat.ask_once", return_value="ok")
+    @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
+    def test_repl_auto_skill_on_first_input(self, _client, mock_ask):
+        with patch("builtins.input", side_effect=["帮我复盘一下今天", "exit"]):
+            code = ai_chat.run()
+        self.assertEqual(code, 0)
+        messages = mock_ask.call_args.args[2]
+        self.assertTrue(
+            any(
+                "omg-daily-review" in (m.get("content") or "")
+                for m in messages
+                if m.get("role") == "system"
+            )
+        )
+        self.assertTrue(mock_ask.call_args.kwargs.get("research"))
 
 
 if __name__ == "__main__":

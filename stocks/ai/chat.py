@@ -6,8 +6,10 @@ import json
 import sys
 from typing import Any, Optional
 
+from stocks.ai import skills as ai_skills
 from stocks.ai import tools as ai_tools
 from stocks.ai.llm import ConfigError, client as llm_client
+from stocks.ai.skills import SkillError
 
 HISTORY_KEEP = 20
 MAX_TOOLS = 8
@@ -19,11 +21,19 @@ SYSTEM = """你是 A 股行情助手，运行在 omg chat 中。
 规则：
 1. 行情结论必须来自 tools（mood/style/rot/crowd/etf/hot/list），不要自行编造涨跌幅或阶段。
 2. 需要外部新闻/公告时用 web_search。
-3. 回答简洁，用中文；先给结论，再列依据与风险。
-4. 不做交易下单建议的具体仓位指令；可给观察维度与风险提示。
+3. 用中文；先结论，再依据、风险，并可给操作建议与关注建议。信息要密：名称 + 1～2 个关键数字/对比。
+4. 控制篇幅：宁短勿水。不要大段表格或逐日罗列；只保留拐点/极值/代表项。
+5. 操作/关注建议必须能回溯到刚取到的 tool 证据；用「宜/不宜/优先观察」表述。
+6. 禁止：具体仓位比例、目标价、下单指令、保证收益话术。这不是投顾荐股。
 """
 
-SYSTEM_RESEARCH = """当前为 research 模式：先规划需要的维度，再尽量多调用 tools / web_search 取证，发现缺口再补调，最后输出结论、依据（注明用过的 tool）与风险点。不要空口结论。
+SYSTEM_RESEARCH = """当前为 research 模式：
+1. 先规划维度，再尽量多调用 tools / web_search 取证，缺口再补调。
+2. 最终输出五节：## 结论 / ## 依据 / ## 风险 / ## 操作建议 / ## 关注建议；注明用过的 tool。
+3. 密度：结论 3～5 句；依据每维 2～4 句；风险 3～5 条；操作建议 3～5 条；关注建议 3～5 条。
+4. 操作建议=基于证据的行为倾向（如不宜追拥挤科技、可偏向红利/防御观察、等待情绪拐点确认等），不要写成买卖点。
+5. 关注建议=接下来盯什么（涨停家数、某行业拥挤分位、代表 ETF 状态、自选背离等），尽量可验证。
+6. 禁止空泛定调、完整多日大表、ETF 全清单、仓位%/目标价。冲突结构必须写明。
 """
 
 _LIMIT_RESULT = {"ok": False, "data": None, "error": "已达本轮 tool 调用上限"}
@@ -151,28 +161,92 @@ def ask_once(
             return _final_text(oai, model, messages)
 
 
-def _bootstrap(research: bool) -> tuple[object, str, list[dict]]:
+def _skill_system(skill: dict[str, str]) -> dict[str, str]:
+    return {
+        "role": "system",
+        "content": (
+            f"已启用 skill「{skill.get('name', '')}」。"
+            "你已在 omg chat 的 tool loop 中：直接调用已注册 function tools，"
+            "不要再执行 omg CLI、run_once，或 import stocks.ai.tools。"
+            "以下文档里的「如何启动 / When to Use / CLI 示例」仅供人类参考；"
+            "请按其中的取证维度/流程、综合规则与输出模板执行。\n\n"
+            f"{skill['body']}"
+        ),
+    }
+
+
+def _has_system(messages: list[dict], content: str) -> bool:
+    return any(m.get("role") == "system" and m.get("content") == content for m in messages)
+
+
+def _ensure_research_system(messages: list[dict]) -> None:
+    if _has_system(messages, SYSTEM_RESEARCH):
+        return
+    # 插在基础 SYSTEM 之后
+    insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+    messages.insert(insert_at, {"role": "system", "content": SYSTEM_RESEARCH})
+
+
+def _attach_skill(messages: list[dict], skill: dict[str, str]) -> None:
+    marker = f"已启用 skill「{skill.get('name', '')}」"
+    if any(
+        m.get("role") == "system" and marker in (m.get("content") or "")
+        for m in messages
+    ):
+        return
+    messages.append(_skill_system(skill))
+
+
+def _bootstrap(
+    research: bool,
+    *,
+    skill: Optional[dict[str, str]] = None,
+) -> tuple[object, str, list[dict], bool]:
+    """返回 (client, model, messages, research)；挂日复盘/主题研究 skill 时自动打开 research。"""
+    if ai_skills.wants_research(skill):
+        research = True
     oai, model = llm_client()
     messages: list[dict] = [{"role": "system", "content": SYSTEM}]
     if research:
         messages.append({"role": "system", "content": SYSTEM_RESEARCH})
-    return oai, model, messages
+    if skill and skill.get("body"):
+        messages.append(_skill_system(skill))
+    return oai, model, messages, research
 
 
-def run_once(prompt: str, *, research: bool = False) -> str:
-    """单轮非交互：返回助手最终文本。配置错误抛 ConfigError。"""
+def run_once(
+    prompt: str,
+    *,
+    research: bool = False,
+    skill: Optional[str] = None,
+) -> str:
+    """单轮非交互：返回助手最终文本。
+
+    配置错误抛 ConfigError；无效 skill 名抛 SkillError（REPL/CLI 则捕获并 exit 2）。
+    """
     text = (prompt or "").strip()
     if not text:
         raise ValueError("prompt 不能为空")
-    oai, model, messages = _bootstrap(research)
+    loaded = ai_skills.resolve(skill, text)
+    oai, model, messages, research = _bootstrap(research, skill=loaded)
     messages.append({"role": "user", "content": text})
     return ask_once(oai, model, messages, research=research)
 
 
-def run(prompt: Optional[str] = None, research: bool = False) -> int:
-    """交互 REPL。Ctrl-C → 0；配置错误 → 1。"""
+def run(
+    prompt: Optional[str] = None,
+    research: bool = False,
+    skill: Optional[str] = None,
+) -> int:
+    """交互 REPL。Ctrl-C → 0；配置错误 → 1；无效 skill → 2。"""
+    first = (prompt or "").strip() or None
+    explicit_skill = bool(skill and str(skill).strip())
     try:
-        oai, model, messages = _bootstrap(research)
+        loaded = ai_skills.resolve(skill, first)
+        oai, model, messages, research = _bootstrap(research, skill=loaded)
+    except SkillError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print()
         return 0
@@ -184,9 +258,9 @@ def run(prompt: Optional[str] = None, research: bool = False) -> int:
         return 1
 
     mode = "research" if research else "normal"
-    print(f"omg chat（{mode}）· Ctrl-C 退出 · model={model}")
+    skill_tag = f" · skill={loaded['name']}" if loaded else ""
+    print(f"omg chat（{mode}）{skill_tag} · Ctrl-C 退出 · model={model}")
 
-    first = (prompt or "").strip() or None
     request_failed = False
     try:
         while True:
@@ -203,6 +277,16 @@ def run(prompt: Optional[str] = None, research: bool = False) -> int:
                 continue
             if user_text.lower() in ("exit", "quit"):
                 return 0
+
+            # 无 CLI 首问时：第一条用户输入再尝试自动挂 skill
+            if loaded is None and not explicit_skill:
+                loaded = ai_skills.resolve(None, user_text)
+                if loaded:
+                    _attach_skill(messages, loaded)
+                    if ai_skills.wants_research(loaded):
+                        research = True
+                        _ensure_research_system(messages)
+                    print(f"（已启用 skill={loaded['name']}，research={'on' if research else 'off'}）")
 
             messages.append({"role": "user", "content": user_text})
             print("…", flush=True)

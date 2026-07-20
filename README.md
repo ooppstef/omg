@@ -64,6 +64,15 @@ omg chat
 
 Optional: `OMG_LLM_TIMEOUT`, `OMG_SEARCH_MAX_RESULTS`. Exit with Ctrl-C (or `exit` / `quit`). `--research` raises the tool-call budget and asks the model to gather evidence before concluding.
 
+Project skills under `.cursor/skills/*/SKILL.md` can be loaded into `omg chat` (injected as system instructions; tools stay the same):
+
+```sh
+omg chat --list-skills
+omg chat --skill omg-daily-review          # 显式 skill 也会自动打开 research
+omg chat "帮我复盘一下今天"                 # 自动挂日复盘 skill + research
+omg chat "深挖一下板块 半导体"               # 自动挂主题研究 skill + research
+```
+
 `omg etf` scans one largest-AUM ETF per theme (~81 names), labels short/mid regime, and prints volume-price commentary. Optional: `OMG_ETF_MAX=20` for a quicker smoke run.
 
 `omg mood` classifies emotion stages (冰点/修复/主升/分歧/退潮) from akshare limit-up / broken-board / limit-down / previous limit-up pools, then prints today metrics and a recent-day trend table. Optional: `OMG_MOOD_DAYS=8`.
