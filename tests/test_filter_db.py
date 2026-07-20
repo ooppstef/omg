@@ -46,6 +46,14 @@ class TestCoverage(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(ratio, 0.5)
 
+    def test_coverage_rejects_unknown_table_name(self):
+        with self.assertRaisesRegex(ValueError, "表名"):
+            db._check_coverage(
+                self.conn,
+                expected=1,
+                table="DailyQuote WHERE 1 = 1",
+            )
+
     def test_history_coverage_requires_minimum_rows_per_expected_code(self):
         rows = [
             (

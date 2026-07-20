@@ -7,7 +7,7 @@ COMMAND_META = {
     "init": ("init_data", "初始化本地数据"),
     "list": ("my_list", "自选列表"),
     "hot": ("hot", "热点强度"),
-    "notice": ("notice", "公告列表"),
+    "notice": ("notice", "查看列表行情"),
     "rot": ("rot", "板块轮动"),
     "filter": ("filter_menu", "筛选菜单"),
     "copy": (None, "同步自选"),
@@ -35,7 +35,7 @@ def run_command(command):
 def _run_chat(argv):
     parser = argparse.ArgumentParser(
         prog="omg chat",
-        description="AI 多轮对话（可加载 .cursor/skills 下的 SKILL.md）",
+        description="AI 多轮对话（可加载内置或项目目录下的 SKILL.md）",
     )
     parser.add_argument(
         "--research",
@@ -91,7 +91,7 @@ def _run_chat(argv):
 
         rows = ai_skills.list_skills()
         if not rows:
-            print("未找到 skill（期望目录 .cursor/skills/*/SKILL.md）")
+            print("未找到内置 skill 或 .cursor/skills/*/SKILL.md")
             return 1
         for row in rows:
             desc = row["description"]

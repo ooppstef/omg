@@ -102,7 +102,12 @@ def _tool_mood(args: dict) -> dict:
         data = mood.analyze(days=days)
     if not data:
         return _err("无可用情绪数据")
-    return _ok(data)
+    payload = []
+    for row in data:
+        item = dict(row)
+        item.pop("pools", None)
+        payload.append(item)
+    return _ok(payload)
 
 
 def _tool_style(args: dict) -> dict:

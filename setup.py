@@ -27,7 +27,12 @@ setup(
         ],
     },
     install_requires=INSTALL_REQUIRES,
-    package_data={"stocks": ["etf_universe.csv"]},
+    package_data={
+        "stocks": [
+            "etf_universe.csv",
+            "ai/bundled_skills/*/SKILL.md",
+        ]
+    },
     include_package_data=True,
     python_requires=">=3.10,<3.14",
 )

@@ -6,9 +6,6 @@ import stocks.db as base_db
 from stocks.filter.algo import STRATEGIES
 
 
-GLOSSARY_PATH = "docs/filter-field-glossary.md"
-
-
 def _get_name_map():
     """构建 code -> name 映射，用于输出时补充股票名称。"""
     import sqlite3
@@ -92,7 +89,6 @@ def _glossary_lines():
         "  - PPO: 百分比版 MACD，适合横向比较不同价位股票。",
         "  - close_loc: 收盘在当日振幅中的位置，越高表示越接近日内强势收盘。",
         "  - 缩量比: 回调期成交量 / 上涨期成交量，越低通常表示抛压越轻。",
-        f"  - 字段词典: {GLOSSARY_PATH}",
     ]
 
 

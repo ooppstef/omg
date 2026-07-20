@@ -163,6 +163,22 @@ class TestClassifyMood(unittest.TestCase):
         state, _ = classify_mood(m)
         self.assertEqual(state, STATE_REPAIR)
 
+    def test_sixty_limit_ups_with_low_height_is_repair(self):
+        m = {
+            "limit_up": 60,
+            "limit_down": 5,
+            "zhaban": 8,
+            "zhaban_rate": 8 / 68,
+            "height": 3,
+            "premium": 2.0,
+            "first_board_ratio": 0.6,
+            "ok": True,
+        }
+
+        state, _ = classify_mood(m)
+
+        self.assertEqual(state, STATE_REPAIR)
+
     def test_ice(self):
         m = {
             "limit_up": 15,

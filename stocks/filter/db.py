@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS DailyQuote (
 
 _UPDATE_THREAD_LOCK = RLock()
 _UPDATE_LOCK_STATE = local()
+_QUOTE_TABLES = frozenset({"DailyQuote", "DailyQuote_tmp"})
+
+
+def _quote_table_name(table):
+    if table not in _QUOTE_TABLES:
+        raise ValueError(f"不支持的行情表名: {table}")
+    return table
 
 
 def _update_lock_path():
@@ -89,9 +96,10 @@ def _serialized_update(func):
 
 def _replace_table_atomically(conn, source_table, target_table):
     """在显式事务中交换表，失败时保留原表。"""
-    valid_names = {"DailyQuote", "DailyQuote_tmp", "DailyQuote_backup"}
-    if source_table not in valid_names or target_table not in valid_names:
-        raise ValueError("不支持的表名")
+    source_table = _quote_table_name(source_table)
+    target_table = _quote_table_name(target_table)
+    if source_table == target_table:
+        raise ValueError("源表与目标表不能相同")
     backup_table = f"{target_table}_backup"
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -184,6 +192,7 @@ def _fetch_one(code, start):
 
 def _batch_fetch(codes, start, conn, table, label, progress):
     """并发拉取写入，返回 (成功数, 失败数, 失败样本)。"""
+    table = _quote_table_name(table)
     total = len(codes)
     done = ok = fail = 0
     fail_samples = []
@@ -234,8 +243,12 @@ def _print_failures(fail, samples, total):
 
 def _check_coverage(conn, expected, table="DailyQuote", expected_date=None):
     """返回 (最新日期, 覆盖数, 覆盖率)。"""
+    table = _quote_table_name(table)
     if expected_date is None:
-        row = conn.execute(f"SELECT MAX(trade_date) FROM {table}").fetchone()
+        # SQLite cannot bind identifiers; table has passed the allowlist.
+        row = conn.execute(
+            f"SELECT MAX(trade_date) FROM {table}"  # nosec
+        ).fetchone()
         latest = row[0] if row else None
     else:
         latest = expected_date
@@ -244,7 +257,7 @@ def _check_coverage(conn, expected, table="DailyQuote", expected_date=None):
     if isinstance(expected, int):
         expected_count = expected
         count = conn.execute(
-            f"SELECT COUNT(DISTINCT code) FROM {table} WHERE trade_date = ?",
+            f"SELECT COUNT(DISTINCT code) FROM {table} WHERE trade_date = ?",  # nosec
             (latest,),
         ).fetchone()[0]
     else:
@@ -253,7 +266,7 @@ def _check_coverage(conn, expected, table="DailyQuote", expected_date=None):
         actual_codes = {
             str(row[0])
             for row in conn.execute(
-                f"SELECT DISTINCT code FROM {table} WHERE trade_date = ?",
+                f"SELECT DISTINCT code FROM {table} WHERE trade_date = ?",  # nosec
                 (latest,),
             )
         }
@@ -291,15 +304,17 @@ def _check_history_coverage(
     table="DailyQuote",
     min_rows=HISTORY_MIN_ROWS,
 ):
+    table = _quote_table_name(table)
     expected_codes = {str(code) for code in expected}
+    # SQLite cannot bind identifiers; table has passed the allowlist.
+    query = (
+        f"SELECT code FROM {table} "  # nosec
+        "GROUP BY code "
+        "HAVING COUNT(DISTINCT trade_date) >= ?"
+    )
     qualified_codes = {
         str(row[0])
-        for row in conn.execute(
-            f"""SELECT code FROM {table}
-                GROUP BY code
-                HAVING COUNT(DISTINCT trade_date) >= ?""",
-            (min_rows,),
-        )
+        for row in conn.execute(query, (min_rows,))
     }
     count = len(expected_codes & qualified_codes)
     ratio = count / len(expected_codes) if expected_codes else 0
@@ -452,7 +467,7 @@ def incremental_update(progress=True, target_date=None, codes=None):
         )
         # 清理过期数据
         cutoff = _cutoff_date()
-        conn.execute(f"DELETE FROM DailyQuote_tmp WHERE trade_date < ?", (cutoff,))
+        conn.execute("DELETE FROM DailyQuote_tmp WHERE trade_date < ?", (cutoff,))
         conn.commit()
         if progress:
             print(f"  最新交易日 {latest} 覆盖 {count}/{total} ({ratio:.1%})")

@@ -147,18 +147,17 @@ def _pick_signal(df):
         return None
 
     last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
-    o, h, l, c = (
+    o, h, low, c = (
         float(last["open"]),
         float(last["high"]),
         float(last["low"]),
         float(last["close"]),
     )
     body = abs(c - o)
-    rng = h - l
-    prev_close = float(prev["close"])
+    rng = h - low
     prev_low = float(prev["low"])
     prev2_low = float(prev2["low"])
-    lower = min(c, o) - l
+    lower = min(c, o) - low
     chg = float(last.get("change_pct", 0) or 0)
     prev_chg = float(prev.get("change_pct", 0) or 0)
     prev2_chg = float(prev2.get("change_pct", 0) or 0)
@@ -172,7 +171,7 @@ def _pick_signal(df):
         return "跌速收敛"
 
     # 低点企稳：最近不再创新低，且实体收窄。
-    if l >= min(prev_low, prev2_low) * 0.995 and body / max(c, 1.0) <= 0.015:
+    if low >= min(prev_low, prev2_low) * 0.995 and body / max(c, 1.0) <= 0.015:
         return "低点企稳"
 
     # 小实体止跌：实体小，跌幅温和。
@@ -580,7 +579,7 @@ def trend_pullback(code, df):
             return None
 
     close = float(last["close"])
-    ma5, ma10, ma20 = float(last["ma5"]), float(last["ma10"]), float(last["ma20"])
+    ma10, ma20 = float(last["ma10"]), float(last["ma20"])
     atr_val = float(last["atr"])
     dif, dea = float(last["dif"]), float(last["dea"])
     macd_h = float(last["macd_hist"])

@@ -179,12 +179,17 @@ def classify_style(feat: dict[str, Any]) -> tuple[str, list[str]]:
             f"科创超额5日{_pct(e5_kc)} / 20日{_pct(e20_kc)}",
         ]
 
-    # 均衡：主要超额都不大
-    abs_vals = [abs(e5_kc), abs(e20_kc), abs(e5_zz), abs(e20_zz), abs(e5_div), abs(e20_div)]
-    if max(abs_vals) <= 0.025:
+    # 均衡：各风格之间的两两超额都不大
+    spreads_5 = (0.0, e5_kc, e5_zz, e5_div)
+    spreads_20 = (0.0, e20_kc, e20_zz, e20_div)
+    max_pairwise = max(
+        max(spreads_5) - min(spreads_5),
+        max(spreads_20) - min(spreads_20),
+    )
+    if max_pairwise <= 0.025:
         return STATE_BALANCED, [
             "均衡扩散：风格超额幅度有限，未形成单边虹吸",
-            f"最大|超额|约{_pct(max(abs_vals))}",
+            f"最大两两超额约{_pct(max_pairwise)}",
         ] + metrics
 
     # 其余：短线权重更高，避免中线惯性盖住当下切换

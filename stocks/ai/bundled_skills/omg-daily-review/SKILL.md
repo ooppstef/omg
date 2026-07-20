@@ -1,0 +1,107 @@
+---
+name: omg-daily-review
+description: >
+  Use when the user asks for A-share daily review, market pulse, or phrases like
+  今天怎么看 / 帮我复盘 / 复盘一下 / 今日复盘 / 做个日复盘 / 做个复盘,
+  or wants omg/omg chat to gather evidence before concluding.
+  Prefer this over free-form market commentary.
+  Bare 复盘 / 昨日复盘 / 多日复盘 alone do not auto-load.
+---
+
+# omg 日复盘（AI）
+
+## Overview
+
+用 `omg` 确定性行情取证，再写成**信息密度高、篇幅中等**的中文复盘。结论必须来自工具结果；禁止编造数字/阶段，也禁止空泛套话和大段表格。
+
+## When to Use
+
+- 「今天怎么看」「帮我复盘」「复盘一下」「今日复盘」「做个日复盘」「做个复盘」
+- 需要综合情绪 / 风格 / 轮动 / 拥挤 / ETF / 热点 / 自选
+- 用户要基于 omg 数据，而不是宏观空论
+
+自动挂载或显式 `--skill omg-daily-review` 时也会打开 research（更多 tool 预算）。
+裸词「复盘 / 盘面 / research / 深挖」不会触发。
+「昨日复盘已经写了」这类完成态不会触发；但「昨日复盘一下」仍会（含「复盘一下」）。
+
+## When NOT to Use
+
+- 改代码 / 修 bug / 加 tool
+- 全市场 `filter` 筛票
+- 要具体仓位比例、目标价、下单指令（可给操作倾向与关注清单，见模板）
+
+## 如何启动（人类 / Cursor）
+
+在 **omg chat** 里启用本 skill（注入 system；不是 OpenAI 云端 Skills API）：
+
+```sh
+omg chat --list-skills
+omg chat --skill omg-daily-review
+omg chat "帮我复盘一下今天，给操作建议和关注建议"
+```
+
+非交互：
+
+```python
+from stocks.ai.chat import run_once
+
+answer = run_once(
+    "帮我复盘一下今天，并给出操作建议与关注建议",
+    skill="omg-daily-review",
+)
+print(answer)
+```
+
+若已在 `omg chat` 会话中：忽略上面启动示例，直接按下方取证维度调用已注册 tools。
+
+## 取证维度
+
+按需调用：`mood` / `style` / `rot` / `crowd` / `etf` / `hot` / `list`；突发新闻再 `web_search`。
+只用成功返回的数据；失败记「数据缺口」。禁止 `filter`。
+
+## 综合规则
+
+1. 先情绪×风格定调，再写轮动/热点/ETF。
+2. 冲突写明（如情绪修复 vs 红利防守）。
+3. 高拥挤只作风险阀，不作单独看多理由。
+4. 自选：与主线一致/背离各点 1～2 只代表股（带涨跌）。
+5. **密度 > 篇幅**：每条尽量「对象 + 数字 + 含义」；删形容词堆砌。
+6. **摘录不倾倒**：多日情绪只写拐点（如极端退潮日→今日）；ETF/拥挤只写 Top3～5 或与主线相关项。
+
+## 输出模板（必须遵守）
+
+目标体量：约一屏半到两屏（约 600～1100 字），信息集中、可扫读。
+
+```markdown
+## 结论
+- 情绪×风格定调（带今日关键数字）
+- 主线 2～3 条：板块/ETF 名 + 一句证据
+- 一句「今日最该警惕的点」
+
+## 依据
+- 情绪 / 风格 / 轮动 / 热点 / 拥挤 / ETF / 指数与自选（各 2～4 句，名称+数字；勿大表）
+
+## 风险
+- 3～5 条可验证风险（拥挤分位、退潮残留、风格背离、数据缺口）
+
+## 操作建议
+- 3～5 条「宜 / 不宜 / 优先」行为倾向，必须挂靠上面的证据
+- 例：不宜追高拥挤科技；反弹中更宜观察红利/防御是否延续；等待涨停家数与跌停收敛再提高进攻意愿
+- 禁止：仓位%、目标价、「买入 XX」「加仓到 x 成」
+
+## 关注建议
+- 3～5 条接下来盯什么（尽量可量化/可复查）
+- 例：明日 mood 涨停/跌停与炸板率；半导体拥挤分位是否回落；医药/红利代表 ETF 短线状态；自选中与主线背离品种
+```
+
+## 质量闸门
+
+- [ ] 无空话定调；有具体名称与关键数字
+- [ ] 操作建议、关注建议都能指回依据/tool
+- [ ] 失败维度已声明
+- [ ] 无仓位比例、目标价、下单指令
+
+## 示例触发
+
+用户：`帮我复盘一下今天`
+→ 自动 skill + research → 按取证维度调 tools → 按模板输出。

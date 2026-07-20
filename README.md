@@ -1,6 +1,6 @@
 # omg
 
-`omg` is a small Python command-line toolkit for tracking and reviewing A-share market data. It focuses on practical daily workflows: watchlists, market heat, announcements, industry rotation, concept strength charts, and local screening.
+`omg` is a small Python command-line toolkit for tracking and reviewing A-share market data. It focuses on practical daily workflows: watchlists, market heat, industry rotation, concept strength charts, and local screening.
 
 The project is built around public market data libraries and local files. Core commands do not need a hosted account; `omg chat` optionally uses your own OpenAI-compatible LLM API.
 
@@ -12,7 +12,7 @@ The project is built around public market data libraries and local files. Core c
 - Review industry/theme ETF trend states with rule-based commentary.
 - Review market mood stages from East Money limit-up pools (via akshare).
 - Review style structure across CSI 300 / CSI 1000 / STAR 50 / dividend.
-- Read stock announcements.
+- Review live quotes from a secondary watchlist.
 - Plot concept strength curves for one or more concepts.
 - Run local screening helpers.
 - Sync a watchlist section to another local text file through an explicit target path.
@@ -64,7 +64,9 @@ omg chat
 
 Optional: `OMG_LLM_TIMEOUT`, `OMG_SEARCH_MAX_RESULTS`. Exit with Ctrl-C (or `exit` / `quit`). `--research` raises the tool-call budget and asks the model to gather evidence before concluding.
 
-Project skills under `.cursor/skills/*/SKILL.md` can be loaded into `omg chat` (injected as system instructions; tools stay the same):
+Bundled skills can be loaded into `omg chat`; source checkouts may override them
+with matching skills under `.cursor/skills/*/SKILL.md` (injected as system
+instructions; tools stay the same):
 
 ```sh
 omg chat --list-skills
@@ -84,6 +86,9 @@ The watchlist is stored in the user data directory as `my_list.txt`:
 - macOS: `~/Library/Application Support/omg/`
 - Linux: `${XDG_DATA_HOME:-~/.local/share}/omg/`
 - Windows: `%LOCALAPPDATA%\omg\`
+
+`omg list` reads the `# 自选` section. The compatibility command `omg notice`
+reads `# 查看` as a secondary live-quote list; it does not fetch announcements.
 
 Set `OMG_DATA_DIR` to override this location. To sync its `# 自选` section to
 another local file:

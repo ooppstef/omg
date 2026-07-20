@@ -158,7 +158,10 @@ def search_base_by_shorts(shorts):
     if not shorts:
         return []
     placeholders = ", ".join(["?" for _ in shorts])
-    query = f"SELECT * FROM Base WHERE short IN ({placeholders})"
+    # The interpolated fragment contains only generated "?" placeholders.
+    query = (
+        f"SELECT * FROM Base WHERE short IN ({placeholders})"  # nosec
+    )
     return _query_all(query, shorts)
 
 
@@ -170,7 +173,10 @@ def search_base_by_names(names):
     if not names:
         return []
     placeholders = ", ".join(["?" for _ in names])
-    query = f"SELECT * FROM Base WHERE name IN ({placeholders})"
+    # The interpolated fragment contains only generated "?" placeholders.
+    query = (
+        f"SELECT * FROM Base WHERE name IN ({placeholders})"  # nosec
+    )
     return _query_all(query, names)
 
 
@@ -180,7 +186,10 @@ def search_base_by_names_like(names):
     if not names:
         return []
     placeholders = " OR ".join(["name LIKE ?" for _ in names])
-    query = f"SELECT * FROM Base WHERE {placeholders}"
+    # The interpolated fragment contains only repeated "name LIKE ?" clauses.
+    query = (
+        f"SELECT * FROM Base WHERE {placeholders}"  # nosec
+    )
     params = [f"%{name}%" for name in names]
     return _query_all(query, params)
 

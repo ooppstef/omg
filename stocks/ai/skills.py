@@ -1,4 +1,4 @@
-"""从项目 .cursor/skills 加载 SKILL.md，供 omg chat 注入 system。"""
+"""加载内置或项目 .cursor/skills 中的 SKILL.md，供 omg chat 注入 system。"""
 
 from __future__ import annotations
 
@@ -43,22 +43,33 @@ def skills_root() -> Path:
     return Path(__file__).resolve().parents[2] / ".cursor" / "skills"
 
 
+def bundled_skills_root() -> Path:
+    return Path(__file__).resolve().parent / "bundled_skills"
+
+
+def _skill_roots() -> list[Path]:
+    roots = []
+    for root in (skills_root(), bundled_skills_root()):
+        if root.is_dir() and root not in roots:
+            roots.append(root)
+    return roots
+
+
 def list_skills() -> list[dict[str, str]]:
-    root = skills_root()
-    if not root.is_dir():
-        return []
-    rows = []
-    for path in sorted(root.glob("*/SKILL.md")):
-        meta, _ = _parse(path.read_text(encoding="utf-8"))
-        name = meta.get("name") or path.parent.name
-        rows.append(
-            {
-                "name": name,
-                "description": meta.get("description") or "",
-                "path": str(path),
-            }
-        )
-    return rows
+    rows_by_name = {}
+    for root in _skill_roots():
+        for path in sorted(root.glob("*/SKILL.md")):
+            meta, _ = _parse(path.read_text(encoding="utf-8"))
+            name = meta.get("name") or path.parent.name
+            rows_by_name.setdefault(
+                name,
+                {
+                    "name": name,
+                    "description": meta.get("description") or "",
+                    "path": str(path),
+                },
+            )
+    return [rows_by_name[name] for name in sorted(rows_by_name)]
 
 
 def load(name: str) -> dict[str, str]:
@@ -66,23 +77,26 @@ def load(name: str) -> dict[str, str]:
     key = (name or "").strip()
     if not key:
         raise SkillError("skill 名不能为空")
-    root = skills_root()
-    candidates = [
-        root / key / "SKILL.md",
-        root / key.replace("_", "-") / "SKILL.md",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return _skill_from_path(path)
-    for path in root.glob("*/SKILL.md"):
-        meta, body = _parse(path.read_text(encoding="utf-8"))
-        if (meta.get("name") or "").strip() == key:
-            return {
-                "name": meta.get("name") or path.parent.name,
-                "description": meta.get("description") or "",
-                "body": body,
-                "path": str(path),
-            }
+    if key in {".", ".."} or "/" in key or "\\" in key or "\0" in key:
+        raise SkillError("skill 名不能包含路径分隔符")
+    roots = _skill_roots()
+    for root in roots:
+        candidates = [
+            root / key / "SKILL.md",
+            root / key.replace("_", "-") / "SKILL.md",
+        ]
+        for path in candidates:
+            if path.is_file():
+                return _skill_from_path(path)
+        for path in root.glob("*/SKILL.md"):
+            meta, body = _parse(path.read_text(encoding="utf-8"))
+            if (meta.get("name") or "").strip() == key:
+                return {
+                    "name": meta.get("name") or path.parent.name,
+                    "description": meta.get("description") or "",
+                    "body": body,
+                    "path": str(path),
+                }
     known = ", ".join(s["name"] for s in list_skills()) or "(无)"
     raise SkillError(f"未知 skill: {key}；可用: {known}")
 

@@ -153,6 +153,29 @@ class TestClassifyStyle(unittest.TestCase):
         state, _ = classify_style(feat)
         self.assertEqual(state, STATE_BALANCED)
 
+    def test_balanced_requires_small_pairwise_spreads(self):
+        feat = {
+            "ok": True,
+            "ret5_hs300": 0.0,
+            "ret5_zz1000": -0.024,
+            "ret5_kc50": 0.024,
+            "ret5_dividend": 0.0,
+            "ret20_hs300": 0.0,
+            "ret20_zz1000": -0.024,
+            "ret20_kc50": 0.024,
+            "ret20_dividend": 0.0,
+            "excess5_kc_hs": 0.024,
+            "excess20_kc_hs": 0.024,
+            "excess5_zz_hs": -0.024,
+            "excess20_zz_hs": -0.024,
+            "excess5_div_hs": 0.0,
+            "excess20_div_hs": 0.0,
+        }
+
+        state, _ = classify_style(feat)
+
+        self.assertNotEqual(state, STATE_BALANCED)
+
     def test_short_defense_mid_tech(self):
         """短线切红利、中线科创仍强 → 结论优先当下，并提示中线。"""
         feat = {

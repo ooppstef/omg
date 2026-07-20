@@ -1,8 +1,10 @@
 import io
 import json
 import os
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import main_controller
@@ -86,6 +88,24 @@ class TestTools(unittest.TestCase):
         result = ai_tools.call("mood", {"days": 5})
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"][0]["state"], "主升")
+
+    @patch(
+        "stocks.mood.analyze",
+        return_value=[
+            {
+                "trade_date": "2026-07-16",
+                "state": "主升",
+                "metrics": {"limit_up": 80},
+                "reasons": ["赚钱效应全面"],
+                "pools": {"zt": [{"代码": "000001"}], "zb": [], "dt": [], "prev": []},
+            }
+        ],
+    )
+    def test_mood_tool_omits_raw_pool_rows(self, _mock):
+        result = ai_tools.call("mood", {"days": 5})
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("pools", result["data"][0])
 
     @patch("stocks.mood.analyze", return_value=[{"state": "主升"}])
     def test_mood_uses_environment_default_days(self, mock_analyze):
@@ -538,6 +558,66 @@ class TestSkills(unittest.TestCase):
 
         with self.assertRaises(SkillError):
             ai_skills.load("no-such-skill")
+
+    def test_bundled_skills_work_without_project_cursor_directory(self):
+        from stocks.ai import skills as ai_skills
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing"
+            with patch("stocks.ai.skills.skills_root", return_value=missing):
+                names = {skill["name"] for skill in ai_skills.list_skills()}
+                loaded = ai_skills.load("omg-daily-review")
+
+        self.assertIn("omg-daily-review", names)
+        self.assertIn("日复盘", loaded["body"])
+
+    def test_project_and_bundled_skill_copies_stay_in_sync(self):
+        from stocks.ai import skills as ai_skills
+
+        for project_path in ai_skills.skills_root().glob("*/SKILL.md"):
+            bundled_path = (
+                ai_skills.bundled_skills_root()
+                / project_path.parent.name
+                / project_path.name
+            )
+            self.assertTrue(bundled_path.is_file(), project_path.parent.name)
+            self.assertEqual(
+                project_path.read_text(encoding="utf-8"),
+                bundled_path.read_text(encoding="utf-8"),
+            )
+
+    def test_project_skill_metadata_name_overrides_bundled_skill(self):
+        from stocks.ai import skills as ai_skills
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "skills"
+            custom = root / "custom-directory"
+            custom.mkdir(parents=True)
+            (custom / "SKILL.md").write_text(
+                "---\nname: omg-daily-review\n---\nproject override",
+                encoding="utf-8",
+            )
+            with patch("stocks.ai.skills.skills_root", return_value=root):
+                loaded = ai_skills.load("omg-daily-review")
+
+        self.assertEqual(loaded["body"], "project override")
+
+    def test_skill_name_cannot_escape_skills_root(self):
+        from stocks.ai import skills as ai_skills
+        from stocks.ai.skills import SkillError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "skills"
+            outside = Path(tmp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (outside / "SKILL.md").write_text(
+                "---\nname: outside\n---\nsecret",
+                encoding="utf-8",
+            )
+            with patch("stocks.ai.skills.skills_root", return_value=root):
+                with self.assertRaises(SkillError):
+                    ai_skills.load("../outside")
 
     @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
     def test_run_once_unknown_skill_raises(self, _client):

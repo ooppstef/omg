@@ -172,7 +172,7 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
         return STATE_MAIN, why + base_why()[3:]
 
     # 5) 修复：升温但未高潮
-    if 30 <= up < 60 and down < 10 and rate < 0.35 and 2 <= height <= 4:
+    if 30 <= up <= 60 and down < 10 and rate < 0.35 and 2 <= height <= 4:
         why = [
             "修复：情绪回暖但未到高潮",
             f"涨停{up}家，高度{height}板，跌停{down}家",

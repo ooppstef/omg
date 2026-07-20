@@ -1,3 +1,4 @@
 include stocks/etf_universe.csv
 include requirements.txt
+include .env.example
 prune tests
