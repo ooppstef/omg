@@ -853,6 +853,8 @@ def scan_etf_states(
     top_per_state: int = DEFAULT_TOP_PER_STATE,
     workers: Optional[int] = None,
     universe_path: Optional[str] = None,
+    *,
+    for_report: bool = True,
 ) -> list[dict]:
     if workers is None:
         workers = env_int("OMG_ETF_WORKERS", DEFAULT_WORKERS)
@@ -915,7 +917,9 @@ def scan_etf_states(
     print(
         f"有效样本 {len(available)}/{len(rows)}；东财实时补齐 {patched}；仍滞后 {stale}"
     )
-    return select_for_report(available, top_per_state=top_per_state)
+    if for_report:
+        return select_for_report(available, top_per_state=top_per_state)
+    return available
 
 
 def print_etf_report(rows: list[dict]) -> None:

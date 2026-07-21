@@ -300,6 +300,7 @@ def analyze(
                     tech_errors[code] = err
 
     # —— 标签（热点名单可与 board.hot 共用一次拉取）——
+    do_board = (not skip_board) and bool(rows)
     shared_hot = hot_data
     if industry_by_code is None:
         try:
@@ -307,17 +308,19 @@ def analyze(
         except Exception as exc:
             industry_by_code = {c: None for c in needed}
             errors.append(f"industry:{type(exc).__name__}")
-    if concepts_by_code is None or (not skip_board and shared_hot is None):
-        if shared_hot is None:
-            try:
-                import stocks.ana as ana
+    need_hot = (concepts_by_code is None and bool(needed)) or (
+        do_board and shared_hot is None
+    )
+    if need_hot and shared_hot is None:
+        try:
+            import stocks.ana as ana
 
-                shared_hot = ana.concept_strength_top10(
-                    days=10, top=15, print_result=False
-                )
-            except Exception as exc:
-                shared_hot = None
-                errors.append(f"hot:{type(exc).__name__}")
+            shared_hot = ana.concept_strength_top10(
+                days=10, top=15, print_result=False
+            )
+        except Exception as exc:
+            shared_hot = None
+            errors.append(f"hot:{type(exc).__name__}")
     if concepts_by_code is None:
         try:
             hot_names = []
@@ -326,7 +329,7 @@ def analyze(
                 hot_names = [
                     str(name) for name, _score in (shared_hot.get(latest) or [])
                 ]
-            if not hot_names:
+            if not hot_names and needed:
                 hot_names = rank._live_hot_concept_names()
             concepts_by_code = (
                 rank._live_concepts_by_code(hot_names, needed) if needed else {}
@@ -343,7 +346,8 @@ def analyze(
     crowd_index: dict[str, dict[str, Any]] = {}
     etf_list = list(etf_rows) if etf_rows is not None else None
 
-    if not skip_board:
+    # 无自选时不做板面对齐取证（避免空转）
+    if do_board:
         if market is None:
             try:
                 import stocks.mood as mood
@@ -364,6 +368,8 @@ def analyze(
                             )
                         },
                     }
+                else:
+                    errors.append("mood:empty")
             except Exception as exc:
                 errors.append(f"mood:{type(exc).__name__}")
             try:
@@ -385,6 +391,11 @@ def analyze(
             except Exception as exc:
                 rot_data = None
                 errors.append(f"rot:{type(exc).__name__}")
+        if not rot_data or not any(rot_data.values() if isinstance(rot_data, dict) else []):
+            if "rot:empty" not in errors and not any(
+                e.startswith("rot:") for e in errors
+            ):
+                errors.append("rot:empty")
         rot_index = _index_rot(rot_data)
 
         if hot_data is None:
@@ -398,25 +409,33 @@ def analyze(
                 hot_data = None
                 errors.append(f"hot:{type(exc).__name__}")
         hot_scores = _build_hot_score_map(hot_data)
+        if not hot_scores and not any(e.startswith("hot:") for e in errors):
+            errors.append("hot:empty")
 
         if crowd_rows is None:
             try:
                 import stocks.crowd as crowd
 
-                crowd_rows = crowd.scan_concept_crowding(top=50)
+                # 全量 available 行业（勿用报告 Top 切片，否则自选行业常假缺口）
+                crowd_rows = crowd.scan_concept_crowding(top=10_000, top_stocks=0)
             except Exception as exc:
                 crowd_rows = None
                 errors.append(f"crowd:{type(exc).__name__}")
         crowd_index = _index_crowd(crowd_rows)
+        if not crowd_index and not any(e.startswith("crowd:") for e in errors):
+            errors.append("crowd:empty")
 
         if etf_list is None:
             try:
                 import stocks.etf as etf
 
-                etf_list = etf.scan_etf_states()
+                # 全量 available ETF，不做 select_for_report 截断
+                etf_list = etf.scan_etf_states(for_report=False)
             except Exception as exc:
                 etf_list = None
                 errors.append(f"etf:{type(exc).__name__}")
+        if not etf_list and not any(e.startswith("etf:") for e in errors):
+            errors.append("etf:empty")
 
     items: list[dict[str, Any]] = []
     for row in rows:
@@ -441,7 +460,7 @@ def analyze(
         if tech is None and code not in tech_errors:
             item_errors.append("tech:missing")
         board = None
-        if not skip_board:
+        if do_board:
             board = _board_for_item(
                 industry=industry,
                 concepts=concepts,
@@ -490,6 +509,7 @@ def analyze(
             "max_n": max_n,
             "truncated": truncated,
             "skip_board": skip_board,
+            "board_enabled": do_board,
         },
         "errors": errors,
     }
