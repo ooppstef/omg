@@ -8,7 +8,6 @@ from stocks.stock_models import StockCurrentPrice
 
 _INDEX_LOOKBACK_DAYS = 15
 _prev_close_cache = {}
-_last_prev_close = {}
 _cache_lock = RLock()
 
 
@@ -41,12 +40,6 @@ def _parse_trade_date(trade_date):
 def _remember_previous_close(index_code, trade_date_key, previous_close):
     with _cache_lock:
         _prev_close_cache[(index_code, trade_date_key)] = previous_close
-        _last_prev_close[index_code] = previous_close
-
-
-def _get_last_prev_close(index_code):
-    with _cache_lock:
-        return _last_prev_close.get(index_code)
 
 
 def _previous_close(index_code, trade_date):
@@ -65,14 +58,16 @@ def _previous_close(index_code, trade_date):
         )
     except Exception as exc:
         logging.debug("指数 %s 历史行情获取失败: %s", index_code, exc)
-        return _get_last_prev_close(index_code)
+        return None
 
     if hist_df is None or isinstance(hist_df, Exception) or hist_df.empty:
-        return _get_last_prev_close(index_code)
+        return None
 
     hist_df = hist_df.sort_values(by="trade_date")
     prev_rows = hist_df[hist_df["trade_date"] < trade_date_key]
-    candidate_row = prev_rows.iloc[-1] if not prev_rows.empty else hist_df.iloc[-1]
+    if prev_rows.empty:
+        return None
+    candidate_row = prev_rows.iloc[-1]
 
     try:
         previous_close = float(candidate_row["close"])

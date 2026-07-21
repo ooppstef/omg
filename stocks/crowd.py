@@ -10,6 +10,7 @@ import adata
 import pandas as pd
 import requests
 
+from stocks.universe import A_SHARE_CODE_PREFIXES
 from stocks.util import env_int, fmt_chg
 
 # 行业拥挤度：东财行业板块（BK）。
@@ -486,11 +487,10 @@ def _fetch_concept_top_stocks(index_code: str, top_n: int = 3) -> list:
             for _, r in df.iterrows()
         ]
 
-    valid_prefixes = ("600", "601", "603", "605", "000", "001", "002", "003", "300", "301", "688")
     name_by_code = {}
     codes = []
     for code, name in constituents:
-        if not code.startswith(valid_prefixes):
+        if not code.startswith(A_SHARE_CODE_PREFIXES):
             continue
         if "ST" in name.upper():
             continue

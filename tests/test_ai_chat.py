@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import tempfile
 import types
 import unittest
@@ -121,6 +122,25 @@ class TestTools(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["gainers"][0]["code"], "600000")
         mock_analyze.assert_called_once_with(gainers=10, losers=5)
+
+    def test_rank_tool_suppresses_module_output(self):
+        def noisy_analyze(*, gainers, losers):
+            print("fetch output")
+            print("fetch progress", file=sys.stderr)
+            return {"gainers": [{"code": "600000"}], "losers": []}
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch("stocks.rank.analyze", side_effect=noisy_analyze),
+            patch("sys.stdout", stdout),
+            patch("sys.stderr", stderr),
+        ):
+            result = ai_tools.call("rank", {"gainers": 1, "losers": 1})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_rank_rejects_excessive_gainers(self):
         with patch("stocks.rank.analyze") as mock_analyze:

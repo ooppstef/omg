@@ -85,9 +85,13 @@ def _int_arg(args: dict, name: str, default: int, maximum: int) -> int:
 
 @contextlib.contextmanager
 def _quiet():
-    """工具执行时吞掉模块内 print，避免刷屏 REPL。"""
+    """工具执行时吞掉模块输出，避免刷屏 REPL。"""
     buf = io.StringIO()
-    with _STDOUT_LOCK, contextlib.redirect_stdout(buf):
+    with (
+        _STDOUT_LOCK,
+        contextlib.redirect_stdout(buf),
+        contextlib.redirect_stderr(buf),
+    ):
         yield
 
 

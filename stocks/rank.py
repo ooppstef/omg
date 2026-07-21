@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from stocks.universe import A_SHARE_CODE_PREFIXES
 from stocks.util import finite_float
 
 DEFAULT_GAINERS = 50
@@ -18,19 +19,7 @@ MAX_LOSERS = 50
 HOT_CONCEPT_TOP = 20
 MAX_CONCEPTS = 3
 UNIVERSE = "hs_main_cyb_kcb_ex_st"
-CODE_PREFIXES = (
-    "600",
-    "601",
-    "603",
-    "605",
-    "000",
-    "001",
-    "002",
-    "003",
-    "300",
-    "301",
-    "688",
-)
+CODE_PREFIXES = A_SHARE_CODE_PREFIXES
 _TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -48,7 +37,7 @@ def _is_st(name: str) -> bool:
 
 def _in_universe(code: str) -> bool:
     c = (code or "").strip()
-    return any(c.startswith(p) for p in CODE_PREFIXES)
+    return c.startswith(CODE_PREFIXES)
 
 
 def _first_col(frame: pd.DataFrame, names: tuple[str, ...]) -> Optional[str]:

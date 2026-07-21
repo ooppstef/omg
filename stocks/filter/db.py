@@ -11,6 +11,7 @@ import adata
 import pandas as pd
 from stocks.db import dir_path
 from stocks.paths import data_file, exclusive_file_lock
+from stocks.universe import A_SHARE_CODE_PREFIXES
 
 # ---------- 配置 ----------
 INIT_DAYS = 200  # 初始化拉取交易日数（约10个月）
@@ -18,20 +19,7 @@ HISTORY_MIN_ROWS = 60  # 筛选指标所需的最少历史行数
 WORKERS = 20  # 并发线程数
 COVERAGE_GATE = 0.90  # 增量更新覆盖率门槛
 INIT_COVERAGE_GATE = 0.80  # 全量初始化覆盖率门槛（宽松）
-
-PREFIXES = (
-    "600",
-    "601",
-    "603",
-    "605",
-    "688",
-    "000",
-    "001",
-    "002",
-    "003",
-    "300",
-    "301",
-)
+PREFIXES = A_SHARE_CODE_PREFIXES
 
 DDL = """
 CREATE TABLE IF NOT EXISTS DailyQuote (

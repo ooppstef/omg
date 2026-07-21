@@ -3,6 +3,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
+from stocks.universe import A_SHARE_CODE_PREFIXES
 from stocks.util import env_int, recent_date
 
 # 常量配置
@@ -434,11 +435,10 @@ def _fetch_stocks(code, top_n):
         return stock_confirm(pd.DataFrame()), []
 
     # 只保留沪深主板/创业板/科创板，排除ST
-    valid_prefixes = ("600", "00", "300", "688")
     codes = [
         code
         for code in df["stock_code"].tolist()
-        if str(code).startswith(valid_prefixes)
+        if str(code).startswith(A_SHARE_CODE_PREFIXES)
     ]
 
     all_perfs = _get_stock_perf(codes)
