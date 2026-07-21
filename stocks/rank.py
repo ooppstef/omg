@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from stocks.universe import A_SHARE_CODE_PREFIXES
-from stocks.util import finite_float
+from stocks.util import finite_float, force_direct_http
 
 DEFAULT_GAINERS = 50
 DEFAULT_LOSERS = 20
@@ -21,6 +21,13 @@ MAX_CONCEPTS = 3
 UNIVERSE = "hs_main_cyb_kcb_ex_st"
 CODE_PREFIXES = A_SHARE_CODE_PREFIXES
 _TZ = ZoneInfo("Asia/Shanghai")
+
+# 东财实时榜：push2 / 82.push2 在部分代理环境下不可用，delay 主机可直连
+_EM_SPOT_URL = "https://push2delay.eastmoney.com/api/qt/clist/get"
+_EM_SPOT_FIELDS = "f12,f14,f2,f3,f6,f8"
+_FS_SH = "m:1+t:2,m:1+t:23"
+_FS_SZ = "m:0+t:6,m:0+t:80"
+_FS_HS = f"{_FS_SZ},{_FS_SH}"
 
 
 def _validate_n(name: str, value: int, maximum: int) -> int:
@@ -97,33 +104,100 @@ def filter_universe(df: pd.DataFrame) -> pd.DataFrame:
     return out.loc[mask].reset_index(drop=True)
 
 
-def _fetch_spot() -> pd.DataFrame:
-    import akshare as ak
+def _em_spot_session():
+    import requests
 
-    frames: list[pd.DataFrame] = []
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+    )
+    return session
+
+
+def _normalize_em_diff(diff) -> list:
+    """东财 clist 的 diff 可能是 list，也可能是 {\"0\": {...}, ...}。"""
+    if not diff:
+        return []
+    if isinstance(diff, dict):
+        return list(diff.values())
+    if isinstance(diff, list):
+        return diff
+    return []
+
+
+def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
+    """分页拉取东财 clist 现货，返回统一列名 DataFrame。"""
+    sess = session or _em_spot_session()
+    rows: list[dict] = []
+    for pn in range(1, 100):
+        resp = sess.get(
+            _EM_SPOT_URL,
+            params={
+                "pn": pn,
+                "pz": 100,
+                "po": 1,
+                "np": 1,
+                "fltt": 2,
+                "invt": 2,
+                "fid": "f12",
+                "fs": fs,
+                "fields": _EM_SPOT_FIELDS,
+            },
+            timeout=15,
+            proxies={"http": None, "https": None},
+        )
+        resp.raise_for_status()
+        diff = _normalize_em_diff(
+            ((resp.json() or {}).get("data") or {}).get("diff")
+        )
+        if not diff:
+            break
+        for item in diff:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                {
+                    "代码": str(item.get("f12") or "").strip(),
+                    "名称": str(item.get("f14") or "").strip(),
+                    "最新价": item.get("f2"),
+                    "涨跌幅": item.get("f3"),
+                    "成交额": item.get("f6"),
+                    "换手率": item.get("f8"),
+                }
+            )
+        if len(diff) < 100:
+            break
+    return pd.DataFrame(rows)
+
+
+def _fetch_spot() -> pd.DataFrame:
+    """东财沪深 A 股现货（push2delay + 强制直连）。"""
     errors: list[str] = []
-    for label, fn in (
-        ("sh", ak.stock_sh_a_spot_em),
-        ("sz", ak.stock_sz_a_spot_em),
-    ):
+    frames: list[pd.DataFrame] = []
+    with force_direct_http():
+        session = _em_spot_session()
+        for label, fs in (("sh", _FS_SH), ("sz", _FS_SZ)):
+            try:
+                part = _fetch_em_spot_board(fs, session=session)
+                if part is not None and not part.empty:
+                    frames.append(part)
+                else:
+                    errors.append(f"{label}:empty")
+            except Exception as exc:
+                errors.append(f"{label}:{exc}")
+        if len(frames) == 2:
+            return pd.concat(frames, ignore_index=True)
         try:
-            part = fn()
-            if part is not None and not part.empty:
-                frames.append(part)
-            else:
-                errors.append(f"{label}:empty")
+            whole = _fetch_em_spot_board(_FS_HS, session=session)
         except Exception as exc:
-            errors.append(f"{label}:{exc}")
-    if len(frames) == 2:
-        return pd.concat(frames, ignore_index=True)
-    # 单侧成功不静默半市场：先兜底全市场，再失败
-    try:
-        whole = ak.stock_zh_a_spot_em()
-    except Exception as exc:
-        errors.append(f"all:{exc}")
-        whole = None
-    if whole is not None and not whole.empty:
-        return whole
+            errors.append(f"all:{exc}")
+            whole = None
+        if whole is not None and not whole.empty:
+            return whole
     raise ValueError(
         f"拉取现货失败（分市场完整度 {len(frames)}/2）: {errors}"
     )

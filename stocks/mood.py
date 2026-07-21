@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from stocks.util import env_int
+from stocks.util import env_int, force_direct_http
 
 STATE_ICE = "冰点"
 STATE_REPAIR = "修复"
@@ -218,13 +218,14 @@ def fetch_pools_for_date(trade_date: str) -> dict[str, Any]:
         "dt": ak.stock_zt_pool_dtgc_em,
         "prev": ak.stock_zt_pool_previous_em,
     }
-    for key, fn in fetchers.items():
-        try:
-            df = fn(date=trade_date)
-            result[key] = _as_records(df)
-        except Exception as exc:
-            result[key] = []
-            result["errors"].append(f"{key}:{type(exc).__name__}")
+    with force_direct_http():
+        for key, fn in fetchers.items():
+            try:
+                df = fn(date=trade_date)
+                result[key] = _as_records(df)
+            except Exception as exc:
+                result[key] = []
+                result["errors"].append(f"{key}:{type(exc).__name__}")
     return result
 
 

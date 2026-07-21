@@ -252,15 +252,18 @@ class TestRankAnalyze(unittest.TestCase):
                 },
             ]
         )
-        with patch("akshare.stock_sh_a_spot_em", return_value=sh):
-            with patch(
-                "akshare.stock_sz_a_spot_em", side_effect=RuntimeError("sz down")
-            ):
-                with patch(
-                    "akshare.stock_zh_a_spot_em", return_value=whole
-                ) as mock_all:
-                    out = rank._fetch_spot()
-        mock_all.assert_called_once()
+
+        def fake_board(fs, *, session=None):
+            if fs == rank._FS_SH:
+                return sh
+            if fs == rank._FS_SZ:
+                raise RuntimeError("sz down")
+            if fs == rank._FS_HS:
+                return whole
+            raise AssertionError(fs)
+
+        with patch("stocks.rank._fetch_em_spot_board", side_effect=fake_board):
+            out = rank._fetch_spot()
         self.assertEqual(len(out), 2)
 
     def test_fetch_spot_rejects_half_market_without_fallback(self):
@@ -276,15 +279,57 @@ class TestRankAnalyze(unittest.TestCase):
                 }
             ]
         )
-        with patch("akshare.stock_sh_a_spot_em", return_value=sh):
-            with patch(
-                "akshare.stock_sz_a_spot_em", side_effect=RuntimeError("sz down")
-            ):
-                with patch(
-                    "akshare.stock_zh_a_spot_em", side_effect=RuntimeError("all down")
-                ):
-                    with self.assertRaises(ValueError):
-                        rank._fetch_spot()
+
+        def fake_board(fs, *, session=None):
+            if fs == rank._FS_SH:
+                return sh
+            raise RuntimeError("down")
+
+        with patch("stocks.rank._fetch_em_spot_board", side_effect=fake_board):
+            with self.assertRaises(ValueError):
+                rank._fetch_spot()
+
+    def test_normalize_em_diff_accepts_dict_and_list(self):
+        self.assertEqual(rank._normalize_em_diff(None), [])
+        self.assertEqual(rank._normalize_em_diff([]), [])
+        self.assertEqual(
+            rank._normalize_em_diff([{"f12": "600000"}]),
+            [{"f12": "600000"}],
+        )
+        self.assertEqual(
+            rank._normalize_em_diff({"0": {"f12": "600000"}, "1": {"f12": "000001"}}),
+            [{"f12": "600000"}, {"f12": "000001"}],
+        )
+
+    def test_fetch_em_spot_board_handles_dict_diff(self):
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "data": {
+                        "diff": {
+                            "0": {
+                                "f12": "600000",
+                                "f14": "甲",
+                                "f2": 10.0,
+                                "f3": 1.5,
+                                "f6": 1e8,
+                                "f8": 2.0,
+                            }
+                        }
+                    }
+                }
+
+        class FakeSession:
+            def get(self, *args, **kwargs):
+                return FakeResp()
+
+        out = rank._fetch_em_spot_board(rank._FS_SH, session=FakeSession())
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out.iloc[0]["代码"], "600000")
+        self.assertEqual(out.iloc[0]["名称"], "甲")
 
     def test_live_concepts_follow_hot_name_order(self):
         hot = ["机器人", "半导体", "人工智能"]
