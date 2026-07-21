@@ -565,7 +565,7 @@ def fetch_etf_spot_em(
     url = "https://push2delay.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": _etf_secid(fund_code),
-        "fields": "f43,f47,f48,f57,f58,f60,f169,f170",
+        "fields": "f43,f47,f48,f57,f58,f60,f86,f169,f170",
     }
     try:
         r = _em_session().get(url, params=params, timeout=10)
@@ -588,12 +588,23 @@ def fetch_etf_spot_em(
     amount = finite_float(data.get("f48"))
     if amount is not None and amount < 0:
         amount = None
+    timestamp = finite_float(data.get("f86"))
+    try:
+        china_tz = datetime.timezone(datetime.timedelta(hours=8))
+        trade_date = (
+            datetime.datetime.fromtimestamp(timestamp, tz=china_tz).strftime("%Y-%m-%d")
+            if timestamp is not None and timestamp > 0
+            else None
+        )
+    except (OverflowError, OSError, ValueError):
+        trade_date = None
     return {
         "code": str(data.get("f57") or fund_code),
         "name": str(data.get("f58") or ""),
         "close": close,
         "change_pct": change_pct,
         "amount": amount,
+        "trade_date": trade_date,
     }
 
 
@@ -633,8 +644,8 @@ def frame_last_date(frame: pd.DataFrame) -> Optional[str]:
 
 def resolve_target_as_of(bench_frame: pd.DataFrame) -> str:
     """
-    复盘对齐日：优先宽基最新交易日；若宽基本身缺今日且交易时段可取到实时，则用今日。
-    休市日：要求实时成交额>0，避免把节假日冻价当成新交易日。
+    复盘对齐日：优先宽基最新交易日；若宽基本身缺今日且交易时段可取到实时，
+    则用今日。休市日要求快照日期为今日且成交额>0，避免把冻价当成新交易日。
     """
     today = datetime.date.today().strftime("%Y-%m-%d")
     bench_last = frame_last_date(bench_frame) or today
@@ -651,6 +662,8 @@ def resolve_target_as_of(bench_frame: pd.DataFrame) -> str:
     spot = fetch_etf_spot_em(BENCH_CODE, prev_close=prev)
     if not spot or spot.get("close") is None:
         return bench_last
+    if spot.get("trade_date") != today:
+        return bench_last
     amt = spot.get("amount")
     if amt is None or not (isinstance(amt, (int, float)) and amt > 0):
         return bench_last
@@ -663,9 +676,14 @@ def ensure_etf_as_of(
     target_as_of: str,
 ) -> tuple[pd.DataFrame, dict]:
     """
-    若最后一根 K 线早于目标日，用东财实时补齐目标日一行。
+    先裁掉目标日之后的数据；若最后一根 K 线仍早于目标日，
+    仅用同日东财快照补齐。
     返回 (frame, meta)：as_of / change_source / patched。
     """
+    if frame is not None and not frame.empty:
+        dates = frame["trade_date"].astype(str).str[:10]
+        frame = frame.loc[dates <= target_as_of].reset_index(drop=True)
+
     meta = {
         "as_of": frame_last_date(frame),
         "change_source": CHANGE_SOURCE_ADATA,
@@ -684,6 +702,8 @@ def ensure_etf_as_of(
 
     spot = fetch_etf_spot_em(fund_code, prev_close=prev_close)
     if not spot or spot.get("close") is None:
+        return frame, meta
+    if spot.get("trade_date") != target_as_of:
         return frame, meta
 
     close = float(spot["close"])

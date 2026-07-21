@@ -1,6 +1,6 @@
 import datetime
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
@@ -16,6 +16,7 @@ from stocks.etf import (
     classify_horizon,
     compute_features,
     ensure_etf_as_of,
+    fetch_etf_spot_em,
     load_universe,
     resolve_target_as_of,
 )
@@ -164,6 +165,7 @@ class TestFeaturesAndState(unittest.TestCase):
             "close": 0.425,
             "change_pct": -1.62,
             "amount": 1.1e9,
+            "trade_date": "2026-07-21",
         }
         with patch("stocks.etf.fetch_etf_spot_em", return_value=spot):
             out, meta = ensure_etf_as_of(frame, "512690", "2026-07-21")
@@ -172,6 +174,32 @@ class TestFeaturesAndState(unittest.TestCase):
         self.assertEqual(meta["change_source"], CHANGE_SOURCE_EM_SPOT)
         self.assertEqual(str(out.iloc[-1]["trade_date"]), "2026-07-21")
         self.assertAlmostEqual(float(out.iloc[-1]["change_pct"]), -1.62)
+
+    def test_ensure_etf_as_of_trims_rows_after_target(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-20",
+                    "close": 0.432,
+                    "amount": 1e9,
+                    "change_pct": 1.2,
+                },
+                {
+                    "trade_date": "2026-07-21",
+                    "close": 0.425,
+                    "amount": 1.1e9,
+                    "change_pct": -1.62,
+                },
+            ]
+        )
+
+        with patch("stocks.etf.fetch_etf_spot_em", return_value=None):
+            out, meta = ensure_etf_as_of(frame, "512690", "2026-07-20")
+
+        self.assertEqual(meta["as_of"], "2026-07-20")
+        self.assertFalse(meta["patched"])
+        self.assertEqual(out["trade_date"].tolist(), ["2026-07-20"])
+        self.assertAlmostEqual(float(out.iloc[-1]["change_pct"]), 1.2)
 
     def test_ensure_keeps_patched_close_when_amount_missing(self):
         """amount 缺失时不得让特征对齐丢掉补齐日收盘价。"""
@@ -191,6 +219,7 @@ class TestFeaturesAndState(unittest.TestCase):
             "close": 0.425,
             "change_pct": -1.62,
             "amount": None,
+            "trade_date": "2026-07-21",
         }
         with patch("stocks.etf.fetch_etf_spot_em", return_value=spot):
             out, meta = ensure_etf_as_of(hist, "512690", "2026-07-21")
@@ -220,9 +249,58 @@ class TestFeaturesAndState(unittest.TestCase):
         self.assertEqual(meta["as_of"], "2026-07-20")
         self.assertEqual(len(out), 1)
 
+    def test_ensure_refuses_snapshot_from_different_trade_date(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-17",
+                    "close": 0.432,
+                    "amount": 1e9,
+                    "change_pct": 1.2,
+                }
+            ]
+        )
+        spot = {
+            "close": 0.425,
+            "change_pct": -1.62,
+            "amount": 1.1e9,
+            "trade_date": "2026-07-21",
+        }
+
+        with patch("stocks.etf.fetch_etf_spot_em", return_value=spot):
+            out, meta = ensure_etf_as_of(frame, "512690", "2026-07-20")
+
+        self.assertFalse(meta["patched"])
+        self.assertEqual(meta["as_of"], "2026-07-17")
+        self.assertEqual(out["trade_date"].tolist(), ["2026-07-17"])
+
     def test_scale_em_price_rejects_outlier(self):
         self.assertIsNone(_scale_em_price(999999, prev_close=0.432))
         self.assertAlmostEqual(_scale_em_price(425, prev_close=0.432), 0.425, places=4)
+
+    def test_fetch_etf_spot_includes_snapshot_trade_date(self):
+        response = Mock()
+        response.json.return_value = {
+            "data": {
+                "f43": 425,
+                "f47": 100,
+                "f48": 1.1e9,
+                "f57": "512690",
+                "f58": "酒ETF",
+                "f60": 432,
+                "f86": 1784621505,
+                "f169": -7,
+                "f170": -162,
+            }
+        }
+        session = Mock()
+        session.get.return_value = response
+
+        with patch("stocks.etf._em_session", return_value=session):
+            spot = fetch_etf_spot_em("512690", prev_close=0.432)
+
+        assert spot is not None
+        self.assertEqual(spot["trade_date"], "2026-07-21")
 
     def test_change_label_for_patched_spot(self):
         row = {
@@ -247,6 +325,38 @@ class TestFeaturesAndState(unittest.TestCase):
             mock_dt.datetime.now.return_value = datetime.datetime(2026, 7, 21, 16, 0, 0)
             self.assertEqual(resolve_target_as_of(frame), "2026-07-21")
             mock_spot.assert_not_called()
+
+    def test_resolve_target_rejects_stale_snapshot_with_positive_amount(self):
+        frame = pd.DataFrame(
+            [{"trade_date": "2026-07-20", "close": 4.65, "amount": 1.0}]
+        )
+        stale_spot = {
+            "close": 4.65,
+            "amount": 1.2e10,
+            "trade_date": "2026-07-20",
+        }
+        with patch("stocks.etf.datetime") as mock_dt, patch(
+            "stocks.etf.fetch_etf_spot_em", return_value=stale_spot
+        ):
+            mock_dt.date.today.return_value = datetime.date(2026, 7, 21)
+            mock_dt.datetime.now.return_value = datetime.datetime(2026, 7, 21, 10, 0, 0)
+            self.assertEqual(resolve_target_as_of(frame), "2026-07-20")
+
+    def test_resolve_target_uses_current_snapshot_with_positive_amount(self):
+        frame = pd.DataFrame(
+            [{"trade_date": "2026-07-20", "close": 4.65, "amount": 1.0}]
+        )
+        current_spot = {
+            "close": 4.787,
+            "amount": 1.2e10,
+            "trade_date": "2026-07-21",
+        }
+        with patch("stocks.etf.datetime") as mock_dt, patch(
+            "stocks.etf.fetch_etf_spot_em", return_value=current_spot
+        ):
+            mock_dt.date.today.return_value = datetime.date(2026, 7, 21)
+            mock_dt.datetime.now.return_value = datetime.datetime(2026, 7, 21, 10, 0, 0)
+            self.assertEqual(resolve_target_as_of(frame), "2026-07-21")
 
     def test_normalize_missing_close_returns_empty(self):
         from stocks.etf import _normalize_etf_frame
