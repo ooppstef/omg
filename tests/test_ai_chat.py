@@ -549,7 +549,15 @@ class TestSkills(unittest.TestCase):
         skill = ai_skills.load("omg-daily-review")
         self.assertIn("日复盘", skill["body"])
         self.assertIn("`rank`", skill["body"])
+        self.assertIn("## 涨跌榜", skill["body"])
+        self.assertIn("不含涨跌榜", skill["body"])
+        self.assertNotIn(
+            "情绪 / 风格 / 轮动 / 热点 / 拥挤 / ETF / 涨跌榜 / 指数与自选",
+            skill["body"],
+        )
         self.assertIn("rank", ai_chat.SYSTEM)
+        self.assertIn("独立涨跌榜", ai_chat.SYSTEM_RESEARCH)
+        self.assertNotIn("或本轮用了 rank", ai_chat.SYSTEM_RESEARCH)
 
     def test_resolve_auto_from_prompt(self):
         from stocks.ai import skills as ai_skills
