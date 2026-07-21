@@ -1,17 +1,23 @@
+import datetime
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 from stocks.etf import (
+    CHANGE_SOURCE_EM_SPOT,
     STATE_DOWN,
     STATES,
+    _scale_em_price,
     build_comment,
     build_reason_block,
     classify_etf,
     classify_horizon,
     compute_features,
+    ensure_etf_as_of,
     load_universe,
+    resolve_target_as_of,
 )
 
 
@@ -106,6 +112,9 @@ class TestFeaturesAndState(unittest.TestCase):
             "short_state": "启动趋势",
             "mid_state": "无效震荡",
             "change_pct": 2.5,
+            "as_of": "2026-07-21",
+            "target_as_of": "2026-07-21",
+            "change_source": "adata",
             "short_reasons": ["短线启动：站上MA20", "量比1.50"],
             "mid_reasons": ["中线均线缠绕"],
             "features": {
@@ -118,9 +127,133 @@ class TestFeaturesAndState(unittest.TestCase):
         }
         text = build_comment(row)
         self.assertIn("站上MA20", text)
+        self.assertIn("当日涨跌", text)
         block = build_reason_block(row)
         self.assertIn("短线理由", block)
         self.assertIn("中线理由", block)
+        self.assertIn("当日涨跌", block)
+
+    def test_reason_block_marks_stale_as_of(self):
+        row = {
+            "change_pct": 4.6,
+            "as_of": "2026-07-20",
+            "target_as_of": "2026-07-21",
+            "change_source": "adata",
+            "short_reasons": ["短线强趋势"],
+            "mid_reasons": [],
+        }
+        block = build_reason_block(row)
+        self.assertIn("截至2026-07-20", block)
+        self.assertIn("非目标日2026-07-21", block)
+        self.assertNotIn("当日涨跌:", block)
+
+    def test_ensure_etf_as_of_patches_from_spot(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-20",
+                    "close": 0.432,
+                    "amount": 1e9,
+                    "change_pct": 4.6,
+                }
+            ]
+        )
+        spot = {
+            "code": "512690",
+            "name": "酒ETF鹏华",
+            "close": 0.425,
+            "change_pct": -1.62,
+            "amount": 1.1e9,
+        }
+        with patch("stocks.etf.fetch_etf_spot_em", return_value=spot):
+            out, meta = ensure_etf_as_of(frame, "512690", "2026-07-21")
+        self.assertTrue(meta["patched"])
+        self.assertEqual(meta["as_of"], "2026-07-21")
+        self.assertEqual(meta["change_source"], CHANGE_SOURCE_EM_SPOT)
+        self.assertEqual(str(out.iloc[-1]["trade_date"]), "2026-07-21")
+        self.assertAlmostEqual(float(out.iloc[-1]["change_pct"]), -1.62)
+
+    def test_ensure_keeps_patched_close_when_amount_missing(self):
+        """amount 缺失时不得让特征对齐丢掉补齐日收盘价。"""
+        n = 80
+        idx = pd.bdate_range("2026-03-01", periods=n)
+        hist = pd.DataFrame(
+            {
+                "trade_date": idx.strftime("%Y-%m-%d"),
+                "close": np.linspace(0.4, 0.43, n),
+                "amount": [1e9] * n,
+                "change_pct": [0.1] * n,
+            }
+        )
+        spot = {
+            "code": "512690",
+            "name": "酒ETF",
+            "close": 0.425,
+            "change_pct": -1.62,
+            "amount": None,
+        }
+        with patch("stocks.etf.fetch_etf_spot_em", return_value=spot):
+            out, meta = ensure_etf_as_of(hist, "512690", "2026-07-21")
+        self.assertTrue(meta["patched"])
+        self.assertGreater(float(out.iloc[-1]["amount"]), 0)
+        close = out.set_index("trade_date")["close"]
+        amount = out.set_index("trade_date")["amount"]
+        bench = close * 0.99
+        feat = compute_features(close, amount, bench)
+        self.assertTrue(feat["ok"])
+        self.assertAlmostEqual(float(feat["close"]), 0.425, places=4)
+
+    def test_ensure_refuses_bad_spot(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-20",
+                    "close": 0.432,
+                    "amount": 1e9,
+                    "change_pct": 4.6,
+                }
+            ]
+        )
+        with patch("stocks.etf.fetch_etf_spot_em", return_value=None):
+            out, meta = ensure_etf_as_of(frame, "512690", "2026-07-21")
+        self.assertFalse(meta["patched"])
+        self.assertEqual(meta["as_of"], "2026-07-20")
+        self.assertEqual(len(out), 1)
+
+    def test_scale_em_price_rejects_outlier(self):
+        self.assertIsNone(_scale_em_price(999999, prev_close=0.432))
+        self.assertAlmostEqual(_scale_em_price(425, prev_close=0.432), 0.425, places=4)
+
+    def test_change_label_for_patched_spot(self):
+        row = {
+            "change_pct": -1.62,
+            "as_of": "2026-07-21",
+            "target_as_of": "2026-07-21",
+            "change_source": CHANGE_SOURCE_EM_SPOT,
+            "short_reasons": ["短线强趋势"],
+            "mid_reasons": [],
+        }
+        block = build_reason_block(row)
+        self.assertIn("东财实时补齐", block)
+
+    def test_resolve_target_uses_bench_last_when_current(self):
+        frame = pd.DataFrame(
+            [{"trade_date": "2026-07-21", "close": 4.787, "amount": 1.0, "change_pct": 2.9}]
+        )
+        with patch("stocks.etf.datetime") as mock_dt, patch(
+            "stocks.etf.fetch_etf_spot_em"
+        ) as mock_spot:
+            mock_dt.date.today.return_value = datetime.date(2026, 7, 21)
+            mock_dt.datetime.now.return_value = datetime.datetime(2026, 7, 21, 16, 0, 0)
+            self.assertEqual(resolve_target_as_of(frame), "2026-07-21")
+            mock_spot.assert_not_called()
+
+    def test_normalize_missing_close_returns_empty(self):
+        from stocks.etf import _normalize_etf_frame
+
+        df = pd.DataFrame({"trade_date": ["2026-07-21"], "open": [1.0]})
+        out = _normalize_etf_frame(df, "2026-01-01")
+        self.assertTrue(out.empty)
 
 
 if __name__ == "__main__":

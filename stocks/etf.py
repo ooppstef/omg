@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import datetime
 import math
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
 import adata
 import pandas as pd
+import requests
 
 from stocks.util import env_int, finite_float, fmt_chg
 
@@ -35,6 +37,12 @@ DEFAULT_WORKERS = 12
 
 _UNIVERSE_PATH = Path(__file__).resolve().parent / "etf_universe.csv"
 _EMPTY_COLS = ["trade_date", "close", "amount", "change_pct"]
+_EM_SESSION: Optional[requests.Session] = None
+_EM_SESSION_LOCK = threading.Lock()
+CHANGE_SOURCE_ADATA = "adata"
+CHANGE_SOURCE_EM_SPOT = "eastmoney_spot"
+# 补齐价相对昨收允许偏离；超出则视为东财异常，放弃补齐
+_SPOT_MAX_DEV = 0.25
 
 # 短线 / 中线阈值（同一套判定流水线）
 _HORIZON_CFG = {
@@ -465,7 +473,7 @@ def build_comment(row: dict) -> str:
             text += f"；中线={mid}"
         chg = row.get("change_pct")
         if isinstance(chg, (int, float)) and chg == chg:
-            text += f"；当日{fmt_chg(chg)}"
+            text += f"；{_change_label(row)}{fmt_chg(chg)}"
         return text
     return "数据不足，暂无点评"
 
@@ -480,8 +488,236 @@ def build_reason_block(row: dict) -> str:
         lines.append("中线理由: " + "；".join(mid_rs[:3]))
     chg = row.get("change_pct")
     if isinstance(chg, (int, float)) and chg == chg:
-        lines.append(f"当日涨跌: {fmt_chg(chg)}")
+        lines.append(f"{_change_label(row)}: {fmt_chg(chg)}")
     return "\n".join(f"   {x}" for x in lines) if lines else "   理由: 暂无"
+
+
+def _change_label(row: dict) -> str:
+    as_of = row.get("as_of")
+    target = row.get("target_as_of")
+    source = row.get("change_source") or CHANGE_SOURCE_ADATA
+    if as_of and target and as_of < target:
+        return f"涨跌(截至{as_of}，非目标日{target})"
+    if source == CHANGE_SOURCE_EM_SPOT:
+        return "当日涨跌(东财实时补齐)"
+    if as_of and target and as_of == target:
+        return "当日涨跌"
+    if as_of:
+        return f"涨跌(截至{as_of})"
+    return "涨跌"
+
+
+def _em_session() -> requests.Session:
+    global _EM_SESSION
+    if _EM_SESSION is not None:
+        return _EM_SESSION
+    with _EM_SESSION_LOCK:
+        if _EM_SESSION is None:
+            s = requests.Session()
+            s.trust_env = False  # 避开坏代理；delay 主机可直连
+            s.headers.update(
+                {
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://quote.eastmoney.com/",
+                }
+            )
+            _EM_SESSION = s
+    return _EM_SESSION
+
+
+def _etf_secid(fund_code: str) -> str:
+    code = str(fund_code).strip()
+    market = "0" if code.startswith(("15", "16", "18")) else "1"
+    return f"{market}.{code}"
+
+
+def _scale_em_price(raw, prev_close: Optional[float] = None) -> Optional[float]:
+    """东财 ETF 报价常见为价格×1000；用昨收对齐。无法校验或离谱时返回 None。"""
+    if raw is None:
+        return None
+    try:
+        raw_f = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(raw_f):
+        return None
+    candidates = [raw_f / 1000.0, raw_f / 100.0, raw_f / 10.0, raw_f]
+    if prev_close is not None and prev_close > 0:
+        ranked = sorted(
+            candidates,
+            key=lambda x: abs(x - prev_close) / prev_close,
+        )
+        best = ranked[0]
+        if best > 0 and abs(best - prev_close) / prev_close <= _SPOT_MAX_DEV:
+            return best
+        return None
+    # 无昨收时只接受常见量纲且落在合理区间
+    v = candidates[0]
+    if v is not None and math.isfinite(v) and 0.01 <= v <= 100:
+        return v
+    return None
+
+
+def fetch_etf_spot_em(
+    fund_code: str, prev_close: Optional[float] = None
+) -> Optional[dict]:
+    """东财 delay 实时快照，用作 adata 缺当日 K 线时的后补。"""
+    url = "https://push2delay.eastmoney.com/api/qt/stock/get"
+    params = {
+        "secid": _etf_secid(fund_code),
+        "fields": "f43,f47,f48,f57,f58,f60,f169,f170",
+    }
+    try:
+        r = _em_session().get(url, params=params, timeout=10)
+        data = (r.json() or {}).get("data") or {}
+    except Exception:
+        return None
+    if not data:
+        return None
+    close = _scale_em_price(data.get("f43"), prev_close)
+    if close is None or close <= 0:
+        return None
+    if prev_close is not None and prev_close > 0:
+        if abs(close - prev_close) / prev_close > _SPOT_MAX_DEV:
+            return None
+    chg = data.get("f170")
+    try:
+        change_pct = float(chg) / 100.0 if chg is not None else None
+    except (TypeError, ValueError):
+        change_pct = None
+    amount = finite_float(data.get("f48"))
+    if amount is not None and amount < 0:
+        amount = None
+    return {
+        "code": str(data.get("f57") or fund_code),
+        "name": str(data.get("f58") or ""),
+        "close": close,
+        "change_pct": change_pct,
+        "amount": amount,
+    }
+
+
+def _normalize_etf_frame(df: Optional[pd.DataFrame], start_date: str) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=_EMPTY_COLS)
+    if df is None or df.empty:
+        return empty
+    try:
+        out = df.copy()
+        if "trade_date" not in out.columns or "close" not in out.columns:
+            return empty
+        out["trade_date"] = out["trade_date"].astype(str).str[:10]
+        out["close"] = pd.to_numeric(out["close"], errors="coerce")
+        out["amount"] = (
+            pd.to_numeric(out["amount"], errors="coerce")
+            if "amount" in out.columns
+            else pd.NA
+        )
+        if "change_pct" in out.columns:
+            out["change_pct"] = pd.to_numeric(out["change_pct"], errors="coerce")
+        else:
+            out["change_pct"] = pd.NA
+        out = out.dropna(subset=["close"])
+        out = out.drop_duplicates(subset=["trade_date"], keep="last")
+        out = out.loc[out["trade_date"] >= start_date]
+        cols = [c for c in _EMPTY_COLS if c in out.columns]
+        return out[cols].sort_values("trade_date").reset_index(drop=True)
+    except Exception:
+        return empty
+
+
+def frame_last_date(frame: pd.DataFrame) -> Optional[str]:
+    if frame is None or frame.empty:
+        return None
+    return str(frame.iloc[-1]["trade_date"])[:10]
+
+
+def resolve_target_as_of(bench_frame: pd.DataFrame) -> str:
+    """
+    复盘对齐日：优先宽基最新交易日；若宽基本身缺今日且交易时段可取到实时，则用今日。
+    休市日：要求实时成交额>0，避免把节假日冻价当成新交易日。
+    """
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    bench_last = frame_last_date(bench_frame) or today
+    if bench_last >= today:
+        return bench_last
+
+    now = datetime.datetime.now()
+    if now.weekday() >= 5 or now.hour < 9:
+        return bench_last
+
+    prev = None
+    if bench_frame is not None and not bench_frame.empty:
+        prev = finite_float(bench_frame.iloc[-1].get("close"))
+    spot = fetch_etf_spot_em(BENCH_CODE, prev_close=prev)
+    if not spot or spot.get("close") is None:
+        return bench_last
+    amt = spot.get("amount")
+    if amt is None or not (isinstance(amt, (int, float)) and amt > 0):
+        return bench_last
+    return today
+
+
+def ensure_etf_as_of(
+    frame: pd.DataFrame,
+    fund_code: str,
+    target_as_of: str,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    若最后一根 K 线早于目标日，用东财实时补齐目标日一行。
+    返回 (frame, meta)：as_of / change_source / patched。
+    """
+    meta = {
+        "as_of": frame_last_date(frame),
+        "change_source": CHANGE_SOURCE_ADATA,
+        "patched": False,
+    }
+    if frame is None or frame.empty:
+        return frame if frame is not None else pd.DataFrame(columns=_EMPTY_COLS), meta
+
+    last = meta["as_of"]
+    if last is None or last >= target_as_of:
+        return frame, meta
+
+    prev_close = finite_float(frame.iloc[-1].get("close"))
+    if prev_close is None or prev_close <= 0:
+        return frame, meta
+
+    spot = fetch_etf_spot_em(fund_code, prev_close=prev_close)
+    if not spot or spot.get("close") is None:
+        return frame, meta
+
+    close = float(spot["close"])
+    if close <= 0:
+        return frame, meta
+
+    change_pct = spot.get("change_pct")
+    if change_pct is None:
+        change_pct = (close / prev_close - 1.0) * 100.0
+
+    # amount 缺失时沿用昨额，避免 _align_series.dropna 把补齐日整行丢掉
+    amount = finite_float(spot.get("amount"))
+    if amount is None or amount <= 0:
+        amount = finite_float(frame.iloc[-1].get("amount"))
+    if amount is None or amount <= 0:
+        amount = 1.0
+
+    patch = {
+        "trade_date": target_as_of,
+        "close": close,
+        "amount": amount,
+        "change_pct": change_pct,
+    }
+    out = pd.concat([frame, pd.DataFrame([patch])], ignore_index=True)
+    out = out.drop_duplicates(subset=["trade_date"], keep="last")
+    out = out.sort_values("trade_date").reset_index(drop=True)
+    meta.update(
+        {
+            "as_of": target_as_of,
+            "change_source": CHANGE_SOURCE_EM_SPOT,
+            "patched": True,
+        }
+    )
+    return out, meta
 
 
 def fetch_etf_frame(fund_code: str, start_date: str) -> pd.DataFrame:
@@ -490,23 +726,9 @@ def fetch_etf_frame(fund_code: str, start_date: str) -> pd.DataFrame:
         df = adata.fund.market.get_market_etf(
             fund_code=str(fund_code), k_type=1, start_date=start_date
         )
+        return _normalize_etf_frame(df, start_date)
     except Exception:
         return empty
-    if df is None or df.empty:
-        return empty
-
-    out = df.copy()
-    out["trade_date"] = out["trade_date"].astype(str).str[:10]
-    out["close"] = pd.to_numeric(out["close"], errors="coerce")
-    out["amount"] = pd.to_numeric(out["amount"], errors="coerce")
-    if "change_pct" in out.columns:
-        out["change_pct"] = pd.to_numeric(out["change_pct"], errors="coerce")
-    else:
-        out["change_pct"] = pd.NA
-    out = out.dropna(subset=["close"])
-    out = out.drop_duplicates(subset=["trade_date"], keep="last")
-    out = out.loc[out["trade_date"] >= start_date]
-    return out.sort_values("trade_date").reset_index(drop=True)
 
 
 def _frame_ohlc_series(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -531,7 +753,12 @@ def _parse_change_pct(value) -> Optional[float]:
         return None
 
 
-def analyze_one(meta: dict, bench_close: pd.Series, start_date: str) -> dict:
+def analyze_one(
+    meta: dict,
+    bench_close: pd.Series,
+    start_date: str,
+    target_as_of: Optional[str] = None,
+) -> dict:
     code = meta["code"]
     row = {
         "code": code,
@@ -544,12 +771,24 @@ def analyze_one(meta: dict, bench_close: pd.Series, start_date: str) -> dict:
         "short_reasons": ["行情不足"],
         "mid_reasons": [],
         "change_pct": None,
+        "as_of": None,
+        "target_as_of": target_as_of,
+        "change_source": CHANGE_SOURCE_ADATA,
+        "patched": False,
         "features": {},
         "comment": "行情不足",
     }
     frame = fetch_etf_frame(code, start_date)
     if frame.empty:
         return row
+
+    if target_as_of:
+        frame, asof_meta = ensure_etf_as_of(frame, code, target_as_of)
+        row["as_of"] = asof_meta.get("as_of")
+        row["change_source"] = asof_meta.get("change_source") or CHANGE_SOURCE_ADATA
+        row["patched"] = bool(asof_meta.get("patched"))
+    else:
+        row["as_of"] = frame_last_date(frame)
 
     close, amount = _frame_ohlc_series(frame)
     result = classify_etf(close, amount, bench_close)
@@ -608,6 +847,21 @@ def scan_etf_states(
     start = history_start_date()
     print(f"获取对照宽基 {BENCH_CODE} ...")
     bench_frame = fetch_etf_frame(BENCH_CODE, start)
+    if bench_frame.empty:
+        print("宽基行情获取失败")
+        return []
+
+    target_as_of = resolve_target_as_of(bench_frame)
+    bench_frame, bench_meta = ensure_etf_as_of(bench_frame, BENCH_CODE, target_as_of)
+    bench_as_of = frame_last_date(bench_frame)
+    # 宽基补齐失败时回退目标日，避免单票显示「今日」而特征对齐仍用昨日
+    if bench_as_of and bench_as_of < target_as_of:
+        print(f"宽基未能对齐 {target_as_of}，回退目标日为 {bench_as_of}")
+        target_as_of = bench_as_of
+    elif bench_meta.get("patched"):
+        print(f"宽基缺原目标日，已用东财实时补齐")
+    print(f"对齐目标交易日 {target_as_of}")
+
     bench_close = _prep_series(_frame_ohlc_series(bench_frame)[0])
     if bench_close.empty:
         print("宽基行情获取失败")
@@ -618,7 +872,8 @@ def scan_etf_states(
     rows = []
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futs = {
-            ex.submit(analyze_one, u, bench_close, start): u["code"] for u in universe
+            ex.submit(analyze_one, u, bench_close, start, target_as_of): u["code"]
+            for u in universe
         }
         done = 0
         for fut in as_completed(futs):
@@ -631,7 +886,15 @@ def scan_etf_states(
                 continue
 
     available = [r for r in rows if r.get("available")]
-    print(f"有效样本 {len(available)}/{len(rows)}")
+    patched = sum(1 for r in available if r.get("patched"))
+    stale = sum(
+        1
+        for r in available
+        if r.get("as_of") and r.get("target_as_of") and r["as_of"] < r["target_as_of"]
+    )
+    print(
+        f"有效样本 {len(available)}/{len(rows)}；东财实时补齐 {patched}；仍滞后 {stale}"
+    )
     return select_for_report(available, top_per_state=top_per_state)
 
 
@@ -640,9 +903,14 @@ def print_etf_report(rows: list[dict]) -> None:
         print("无可用 ETF 状态结果")
         return
 
+    target = next((r.get("target_as_of") for r in rows if r.get("target_as_of")), None)
     print("\n=== 主题 ETF 走势点评（短线+中线）===")
     print("说明: 宇宙=每主题规模最大1只；对照=510300 沪深300ETF。")
-    print("      短线≈5-20日，中线≈20-60日；每条含判定理由（规则+关键数字）。\n")
+    print("      短线≈5-20日，中线≈20-60日；每条含判定理由（规则+关键数字）。")
+    if target:
+        print(f"      对齐目标日={target}；缺 K 线时用东财实时补齐，并标注来源。\n")
+    else:
+        print()
 
     by_state: dict[str, list] = {}
     for r in rows:
@@ -657,10 +925,11 @@ def print_etf_report(rows: list[dict]) -> None:
             feat = r.get("features") or {}
             excess = feat.get("excess_10")
             excess_s = f"{excess * 100:+.1f}%" if isinstance(excess, float) else "-"
+            as_of = r.get("as_of") or "-"
             print(
                 f"{i}. {r['theme']}  {r['code']} {r['name']}  "
                 f"短线:{r['short_state']} 中线:{r['mid_state']}  "
-                f"涨跌:{fmt_chg(r.get('change_pct'))} 超额10日:{excess_s}"
+                f"涨跌:{fmt_chg(r.get('change_pct'))}@{as_of} 超额10日:{excess_s}"
             )
             print(build_reason_block(r))
         print()
