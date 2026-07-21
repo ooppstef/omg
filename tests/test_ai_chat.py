@@ -76,7 +76,7 @@ class TestTools(unittest.TestCase):
         names = {s["function"]["name"] for s in ai_tools.schemas()}
         self.assertEqual(
             names,
-            {"mood", "style", "rot", "crowd", "etf", "hot", "list", "rank", "web_search"},
+            {"mood", "style", "rot", "crowd", "etf", "hot", "list", "rank", "watch_advice", "web_search"},
         )
 
     def test_unknown_tool(self):
@@ -551,12 +551,16 @@ class TestSkills(unittest.TestCase):
         self.assertIn("`rank`", skill["body"])
         self.assertIn("## 涨跌榜", skill["body"])
         self.assertIn("不含涨跌榜", skill["body"])
+        self.assertIn("watch_advice", skill["body"])
+        self.assertIn("## 自选操作建议", skill["body"])
         self.assertNotIn(
             "情绪 / 风格 / 轮动 / 热点 / 拥挤 / ETF / 涨跌榜 / 指数与自选",
             skill["body"],
         )
         self.assertIn("rank", ai_chat.SYSTEM)
+        self.assertIn("watch_advice", ai_chat.SYSTEM)
         self.assertIn("独立涨跌榜", ai_chat.SYSTEM_RESEARCH)
+        self.assertIn("自选操作建议", ai_chat.SYSTEM_RESEARCH)
         self.assertNotIn("或本轮用了 rank", ai_chat.SYSTEM_RESEARCH)
 
     def test_resolve_auto_from_prompt(self):

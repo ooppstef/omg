@@ -1,0 +1,226 @@
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+import pandas as pd
+
+from stocks import watch_advice
+
+
+def _fake_ohlcv(n: int = 80) -> pd.DataFrame:
+    rows = []
+    price = 10.0
+    for i in range(n):
+        price *= 1.01
+        rows.append(
+            {
+                "code": "600000",
+                "trade_date": f"2026-01-{(i % 28) + 1:02d}",
+                "open": price,
+                "high": price * 1.01,
+                "low": price * 0.99,
+                "close": price,
+                "volume": 1e6,
+                "amount": 1e8,
+                "change_pct": 1.0,
+                "turnover": 1.0,
+            }
+        )
+    # trade_date 上面会重复；改用顺序日
+    for i, row in enumerate(rows):
+        row["trade_date"] = f"2025-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}"
+    return pd.DataFrame(rows)
+
+
+class TestWatchAdviceHelpers(unittest.TestCase):
+    def test_tech_snapshot_has_core_fields(self):
+        snap = watch_advice._tech_snapshot(_fake_ohlcv())
+        self.assertIn("close", snap)
+        self.assertIn("macd_hist", snap)
+        self.assertIn("adx", snap)
+        self.assertIn("mfi", snap)
+        self.assertIn("vs_ma20_pct", snap)
+
+    def test_board_match_rot_hot_crowd_etf(self):
+        board = watch_advice._board_for_item(
+            industry="半导体",
+            concepts=["存储芯片", "先进封装"],
+            rot_index={
+                "存储芯片": {"group": "升温接力", "score": 12.0, "reason": "升温"}
+            },
+            hot_scores={"存储芯片": 8.5, "其他": 1.0},
+            crowd_index={"半导体": {"crowd_pct": 88.0, "change_pct": 2.0}},
+            etf_rows=[
+                {
+                    "theme": "半导体",
+                    "code": "512480",
+                    "name": "半导体ETF",
+                    "short_state": "见顶",
+                    "mid_state": "空头",
+                    "change_pct": 3.0,
+                }
+            ],
+        )
+        self.assertEqual(board["rot"]["group"], "升温接力")
+        self.assertEqual(board["hot"][0]["name"], "存储芯片")
+        self.assertEqual(board["crowd"]["crowd_pct"], 88.0)
+        self.assertEqual(board["etf"]["code"], "512480")
+
+    def test_board_matches_industry_on_rot(self):
+        board = watch_advice._board_for_item(
+            industry="半导体",
+            concepts=[],
+            rot_index={"半导体": {"group": "回流优先", "score": 7.0, "reason": "回"}},
+            hot_scores={"半导体": 5.0},
+            crowd_index={},
+            etf_rows=None,
+        )
+        self.assertEqual(board["rot"]["name"], "半导体")
+        self.assertEqual(board["hot"][0]["name"], "半导体")
+
+
+class TestWatchAdviceAnalyze(unittest.TestCase):
+    def test_analyze_injected_skip_board(self):
+        watch = [
+            SimpleNamespace(
+                code="600000", name="浦发银行", price=10.0, change_percent=1.2
+            )
+        ]
+        tech = {
+            "600000": {
+                "as_of": "2026-07-21",
+                "close": 10.0,
+                "macd_hist": 0.1,
+                "vs_ma20_pct": 2.0,
+            }
+        }
+        out = watch_advice.analyze(
+            skip_board=True,
+            watch_rows=watch,
+            index_rows=[],
+            industry_by_code={"600000": "银行"},
+            concepts_by_code={"600000": ["高股息"]},
+            tech_by_code=tech,
+            market={"mood": {"state": "分歧"}},
+        )
+        self.assertEqual(len(out["items"]), 1)
+        item = out["items"][0]
+        self.assertEqual(item["industry"], "银行")
+        self.assertEqual(item["concepts"], ["高股息"])
+        self.assertEqual(item["tech"]["close"], 10.0)
+        self.assertIsNone(item["board"])
+        self.assertTrue(out["meta"]["skip_board"])
+
+    def test_analyze_with_board_alignment(self):
+        watch = [
+            SimpleNamespace(
+                code="688981", name="中芯国际", price=50.0, change_percent=5.0
+            )
+        ]
+        out = watch_advice.analyze(
+            skip_board=False,
+            watch_rows=watch,
+            index_rows=[
+                SimpleNamespace(
+                    code="000001", name="上证指数", price=3200.0, change_percent=1.0
+                )
+            ],
+            industry_by_code={"688981": "半导体"},
+            concepts_by_code={"688981": ["芯片"]},
+            tech_by_code={"688981": {"close": 50.0, "adx": 30.0}},
+            market={"mood": {"state": "分歧"}, "style": {"state": "科技虹吸"}},
+            rot_data={
+                "升温接力": [
+                    {"name": "芯片", "score": 9.0, "reason": "强"},
+                ]
+            },
+            hot_data={"2026-07-21": [("芯片", 11.0)]},
+            crowd_rows=[
+                {"board_name": "半导体", "crowd_pct": 90.0, "change_pct": 4.0}
+            ],
+            etf_rows=[
+                {
+                    "theme": "芯片",
+                    "code": "159995",
+                    "name": "芯片ETF",
+                    "short_state": "强趋势",
+                    "mid_state": "多头",
+                    "change_pct": 6.0,
+                }
+            ],
+        )
+        item = out["items"][0]
+        self.assertEqual(item["board"]["rot"]["name"], "芯片")
+        self.assertEqual(item["board"]["hot"][0]["score"], 11.0)
+        self.assertEqual(item["board"]["crowd"]["crowd_pct"], 90.0)
+        self.assertEqual(item["board"]["etf"]["code"], "159995")
+        self.assertEqual(out["market"]["mood"]["state"], "分歧")
+        self.assertEqual(out["indexes"][0]["name"], "上证指数")
+
+    def test_truncate_max_n(self):
+        watch = [
+            SimpleNamespace(
+                code=f"{i:06d}", name=f"S{i}", price=1.0, change_percent=0.0
+            )
+            for i in range(5)
+        ]
+        out = watch_advice.analyze(
+            skip_board=True,
+            max_n=2,
+            watch_rows=watch,
+            index_rows=[],
+            industry_by_code={f"{i:06d}": None for i in range(5)},
+            concepts_by_code={f"{i:06d}": [] for i in range(5)},
+            tech_by_code={f"{i:06d}": {"close": 1.0} for i in range(5)},
+        )
+        self.assertEqual(len(out["items"]), 2)
+        self.assertTrue(out["meta"]["truncated"])
+
+    def test_empty_watchlist_ok_payload(self):
+        out = watch_advice.analyze(
+            skip_board=True,
+            watch_rows=[],
+            index_rows=[],
+            industry_by_code={},
+            concepts_by_code={},
+            tech_by_code={},
+        )
+        self.assertEqual(out["items"], [])
+        self.assertIn("watchlist:empty", out["errors"])
+        from stocks.ai import tools as ai_tools
+
+        with mock.patch("stocks.watch_advice.analyze", return_value=out):
+            result = ai_tools.call("watch_advice", {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["items"], [])
+
+
+class TestWatchAdviceTool(unittest.TestCase):
+    def test_schema_and_handler_registered(self):
+        from stocks.ai import tools as ai_tools
+
+        names = {s["function"]["name"] for s in ai_tools.schemas()}
+        self.assertIn("watch_advice", names)
+        self.assertIn("watch_advice", ai_tools._HANDLERS)
+
+    def test_tool_ok_with_inject(self):
+        from stocks.ai import tools as ai_tools
+
+        payload = {
+            "as_of": "2026-07-21",
+            "indexes": [],
+            "market": {},
+            "items": [{"code": "600000", "name": "甲", "errors": []}],
+            "meta": {},
+            "errors": [],
+        }
+        with mock.patch(
+            "stocks.watch_advice.analyze", return_value=payload
+        ):
+            result = ai_tools.call("watch_advice", {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["items"][0]["code"], "600000")
+
+
+if __name__ == "__main__":
+    unittest.main()

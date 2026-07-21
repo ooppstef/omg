@@ -248,6 +248,18 @@ def _tool_rank(args: dict) -> dict:
     return _ok(data)
 
 
+def _tool_watch_advice(args: dict) -> dict:
+    import stocks.watch_advice as watch_advice
+
+    skip_board = bool(args.get("skip_board") or False)
+    with _quiet():
+        data = watch_advice.analyze(skip_board=skip_board)
+    if data is None:
+        return _err("自选取证失败")
+    # 空自选也返回 ok，由模型在「自选操作建议」写明缺口
+    return _ok(data)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "mood": _tool_mood,
     "style": _tool_style,
@@ -257,6 +269,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "hot": _tool_hot,
     "list": _tool_list,
     "rank": _tool_rank,
+    "watch_advice": _tool_watch_advice,
     "web_search": _tool_web_search,
 }
 
@@ -406,6 +419,22 @@ def schemas() -> list[dict]:
                             "description": "跌幅榜条数，默认 20",
                             "minimum": 1,
                             "maximum": 50,
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "watch_advice",
+                "description": "自选股逐票取证：技术指标全套快照 + 行业/概念 + 板块走势对齐 + 大盘锚",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skip_board": {
+                            "type": "boolean",
+                            "description": "为 true 时跳过 rot/hot/crowd/etf/情绪风格对齐（仅技术+标签）",
                         },
                     },
                 },
