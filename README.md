@@ -1,106 +1,59 @@
 # omg
 
-`omg` is a small Python command-line toolkit for tracking and reviewing A-share market data. It focuses on practical daily workflows: watchlists, market heat, industry rotation, concept strength charts, and local screening.
+A 股 **AI 日复盘** 工具：用本地行情 tools 取证，再由大模型写成结构化复盘（结论 / 依据 / 涨跌榜 / 自选操作建议 / 风险 / 建议）。
 
-The project is built around public market data libraries and local files. Core commands do not need a hosted account; `omg chat` optionally uses your own OpenAI-compatible LLM API.
+日常主路径只有：配置 API → 维护自选 → `omg chat` 复盘。其余 CLI 命令仍可用，但不是推荐用法。
 
-## Features
+## 你能得到什么
 
-- Query a local watchlist.
-- Review hot market concepts and industry rotation.
-- Review East Money industry trading crowding (3-year amount-share percentile).
-- Review industry/theme ETF trend states with rule-based commentary.
-- Review market mood stages from East Money limit-up pools (via akshare).
-- Review style structure across CSI 300 / CSI 1000 / STAR 50 / dividend.
-- Review live quotes from a secondary watchlist.
-- Plot concept strength curves for one or more concepts.
-- Run local screening helpers.
-- Sync a watchlist section to another local text file through an explicit target path.
-- Chat with an OpenAI-compatible LLM that can call local market tools and web search (`omg chat`).
+一次日复盘大致覆盖：
 
-## Installation
+- 情绪 × 风格定调（mood / style）
+- 主线与轮动、热点、拥挤、ETF（rot / hot / crowd / etf）
+- 涨跌榜主题归类（rank）
+- **自选逐票**：技术面 + 板块 + 板走势 + 大盘锚 → 宜/不宜/优先观察（watch_advice）
 
-Python 3.10–3.13 is required.
+不给仓位比例、目标价、下单指令。
+
+## 快速开始
+
+Python 3.10–3.13。
 
 ```sh
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
-```
-
-`TA-Lib` may require native dependencies on some systems. Install the system package first if pip cannot build it.
-
-## Usage
-
-```sh
 omg init
-omg list
-omg hot
-omg notice
-omg rot
-omg crowd
-omg etf
-omg mood
-omg style
-omg filter
-omg chat
-omg chat "今天怎么看"
-omg chat --research
-omg -k 半导体 人工智能
 ```
 
-Run `omg init` once after installation. It creates the local watchlist and
-downloads the stock-name/code index used by name and acronym lookup.
+`TA-Lib` 若编译失败，需先装系统依赖。
 
-`omg chat` needs an OpenAI-compatible API. Copy the example env file and fill in your key:
+### 1. 配置大模型（`omg chat` 必需）
 
 ```sh
 cp .env.example .env
 ```
 
-Edit `.env` (do not commit it; already gitignored):
+编辑 `.env`（已 gitignore，勿提交）：
 
 ```sh
 OMG_LLM_BASE_URL=https://your-endpoint/v1
-OMG_LLM_API_KEY=sk-...          # required — without this, omg chat cannot start
+OMG_LLM_API_KEY=sk-...     # 必填，否则 chat 无法启动
 OMG_LLM_MODEL=your-model
-OMG_LLM_TIMEOUT=120             # optional, 1..600 seconds
+OMG_LLM_TIMEOUT=120        # 可选，1..600
 ```
 
-You can also `export` the same variables in the shell; existing environment variables win over `.env`. Optional: `OMG_SEARCH_MAX_RESULTS`. Exit chat with Ctrl-C (or `exit` / `quit`). `--research` raises the tool-call budget and asks the model to gather evidence before concluding.
+也可用 `export` 同名环境变量；已有环境变量优先于 `.env`。
 
-Bundled skills can be loaded into `omg chat`; source checkouts may override them
-with matching skills under `.cursor/skills/*/SKILL.md` (injected as system
-instructions; tools stay the same):
+### 2. 维护自选
 
-```sh
-omg chat --list-skills
-omg chat --skill omg-daily-review          # 显式 skill 也会自动打开 research
-omg chat "帮我复盘一下今天"                 # 自动挂日复盘 skill + research
-omg chat "深挖一下板块 半导体"               # 自动挂主题研究 skill + research
-```
-
-`omg etf` scans one largest-AUM ETF per theme (~81 names), labels short/mid regime, and prints volume-price commentary. Optional: `OMG_ETF_MAX=20` for a quicker smoke run.
-
-`omg mood` classifies emotion stages (冰点/修复/主升/分歧/退潮) from akshare limit-up / broken-board / limit-down / previous limit-up pools, then prints today metrics and a recent-day trend table. Optional: `OMG_MOOD_DAYS=8`.
-
-`omg style` compares CSI 300, CSI 1000, STAR 50, and dividend index via adata, labels structure (科技虹吸/小盘占优/大盘占优/红利防守/均衡扩散), and prints relative returns plus a recent-day table. Optional: `OMG_STYLE_DAYS=8`.
-
-## Watchlist
-
-The watchlist lives **in the repo** at `stocks/my_list.txt` (gitignored so your picks stay private).
+自选在仓库内（私人文件，已 gitignore）：
 
 ```sh
 cp stocks/my_list.txt.example stocks/my_list.txt
-# then edit stocks/my_list.txt
+# 编辑 stocks/my_list.txt
 ```
-
-If you previously used the App Support copy
-(`~/Library/Application Support/omg/my_list.txt` on macOS), copy those lines
-into `stocks/my_list.txt` — the old path is no longer read.
-
-Format:
 
 ```text
 # 自选
@@ -108,40 +61,65 @@ Format:
 600000
 
 # 查看
-# secondary live-quote list for `omg notice`
 ```
 
-- `omg list` reads `# 自选`
-- `omg notice` reads `# 查看` (quotes only; not announcements)
-- `omg init` creates `stocks/my_list.txt` from the example if it is missing
+- `# 自选`：日复盘 / `watch_advice` / `omg list` 使用  
+- `# 查看`：次要观察列表（`omg notice`）
 
-To sync `# 自选` to another local file:
+若以前用过 macOS  
+`~/Library/Application Support/omg/my_list.txt`，请把内容拷进 `stocks/my_list.txt`——旧路径不再读取。
+
+### 3. 开始复盘
 
 ```sh
-export OMG_COPY_TARGET_PATH=/absolute/path/to/holdings-watchlist.txt
-omg copy
+omg chat "帮我复盘一下今天"
 ```
 
-SQLite indexes and other runtime caches still use the user data directory (override with `OMG_DATA_DIR`):
+会自动挂载日复盘 skill，并打开 research（更多 tool 预算）。也可：
 
-- macOS: `~/Library/Application Support/omg/`
-- Linux: `${XDG_DATA_HOME:-~/.local/share}/omg/`
-- Windows: `%LOCALAPPDATA%\omg\`
+```sh
+omg chat --list-skills
+omg chat --skill omg-daily-review
+omg chat "深挖一下板块 半导体"    # 主题研究 skill
+omg list                         # 仅看指数 + 自选行情
+```
 
-## Data
+退出：`Ctrl-C` 或输入 `exit` / `quit`。
 
-The toolkit uses the Python dependencies listed in `requirements.txt`, including
-`adata`, `pandas`, `matplotlib`, `pypinyin`, and `TA-Lib`. Watchlist text is under
-`stocks/`; derived SQLite / cache files live in the user data directory above and
-can be regenerated by the tool.
+## 复盘时模型会调哪些 tools
 
-## Project Status
+| Tool | 用途 |
+|------|------|
+| mood / style | 情绪阶段、大小盘/科技/红利风格 |
+| rot / hot / crowd / etf | 轮动、概念强度、行业拥挤、主题 ETF |
+| rank | 涨幅/跌幅榜 + 行业与热点概念 |
+| watch_advice | 自选逐票技术 + 板块对齐 + 大盘锚 |
+| list | 指数与自选实时快照 |
+| web_search | 突发新闻/公告（按需） |
 
-This is an early personal workflow tool that is being prepared for public open-source use. The current API and command output may change as the project becomes more documented and tested.
+证据来自 tools；禁止编造涨跌与阶段。
 
-## Disclaimer
+## 其它 CLI（非重点）
 
-This project is for learning, research, and personal workflow automation. It is not financial advice, investment advice, or a trading recommendation. Always verify market data and make independent decisions.
+仍保留 `hot` / `rot` / `crowd` / `etf` / `mood` / `style` / `filter` / `copy` / `-k` 等，便于单独拉数或调试。  
+产品重心是 **`omg chat` 复盘**，不必先学完整命令表。
+
+## 数据与缓存
+
+- 行情依赖：`adata`、`akshare`、`pandas`、`TA-Lib` 等（见 `requirements.txt`）
+- 自选文本：`stocks/my_list.txt`
+- 股票代码库等 SQLite 缓存：用户数据目录（可用 `OMG_DATA_DIR` 覆盖）
+  - macOS: `~/Library/Application Support/omg/`
+  - Linux: `${XDG_DATA_HOME:-~/.local/share}/omg/`
+  - Windows: `%LOCALAPPDATA%\omg\`
+
+## 状态
+
+个人工作流工具，面向开源整理中；接口与输出格式可能调整。
+
+## 免责声明
+
+仅供学习、研究与个人工作流自动化，**不是**投资建议或交易指令。请自行核实行情并独立决策。
 
 ## License
 
