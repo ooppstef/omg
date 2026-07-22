@@ -9,11 +9,15 @@ from stocks import copy_watchlist, db, list_parser, paths
 
 
 class TestLocalDataPaths(unittest.TestCase):
-    def test_runtime_files_use_configurable_user_data_directory(self):
+    def test_runtime_db_uses_configurable_user_data_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"OMG_DATA_DIR": tmp}):
                 self.assertEqual(Path(db.dir_path()).parent, Path(tmp))
-                self.assertEqual(list_parser.my_list_path().parent, Path(tmp))
+
+    def test_watchlist_lives_beside_list_parser_module(self):
+        path = list_parser.my_list_path()
+        self.assertEqual(path.name, "my_list.txt")
+        self.assertEqual(path.parent, Path(list_parser.__file__).resolve().parent)
 
     def test_empty_or_relative_xdg_path_uses_absolute_default(self):
         with (
@@ -46,11 +50,17 @@ class TestLocalDataPaths(unittest.TestCase):
 
     def test_missing_watchlist_is_initialized_with_supported_sections(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"OMG_DATA_DIR": tmp}):
+            path = Path(tmp) / "my_list.txt"
+            example = Path(tmp) / "my_list.txt.example"
+            example.write_text("# 自选\n\n# 查看\n", encoding="utf-8")
+            with (
+                patch("stocks.list_parser.my_list_path", return_value=path),
+                patch("stocks.list_parser.my_list_example_path", return_value=example),
+            ):
                 sections = list_parser.parse_my_list()
 
                 self.assertEqual(sections, {"自选": [], "查看": []})
-                self.assertTrue(list_parser.my_list_path().exists())
+                self.assertTrue(path.exists())
 
     def test_base_queries_are_safe_before_explicit_data_initialization(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,20 +139,40 @@ class TestLocalDataPaths(unittest.TestCase):
             paths.temporary_path_for(target),
         )
 
-    def test_watchlist_initializer_creates_complete_file(self):
+    def test_watchlist_initializer_creates_from_example(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"OMG_DATA_DIR": tmp}):
-                path = list_parser.initialize_my_list()
+            path = Path(tmp) / "my_list.txt"
+            example = Path(tmp) / "my_list.txt.example"
+            example.write_text("# 自选\n示例股\n\n# 查看\n", encoding="utf-8")
+            with (
+                patch("stocks.list_parser.my_list_path", return_value=path),
+                patch("stocks.list_parser.my_list_example_path", return_value=example),
+            ):
+                created = list_parser.initialize_my_list()
 
+                self.assertEqual(created, path)
                 self.assertEqual(
                     path.read_text(encoding="utf-8"),
-                    list_parser.DEFAULT_LIST_CONTENT,
+                    example.read_text(encoding="utf-8"),
                 )
 
-    def test_copy_uses_initialized_user_watchlist(self):
+    def test_parse_sections_skips_hash_comments(self):
+        sections = list_parser.parse_sections(
+            "# 自选\n# 这是注释\n华虹公司\n\n# 查看\n"
+        )
+        self.assertEqual(sections["自选"], ["华虹公司"])
+        self.assertEqual(sections["查看"], [])
+
+    def test_copy_uses_initialized_repo_watchlist(self):
         with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "my_list.txt"
             target = Path(tmp) / "target.txt"
-            with patch.dict(os.environ, {"OMG_DATA_DIR": str(Path(tmp) / "data")}):
+            example = Path(tmp) / "my_list.txt.example"
+            example.write_text("# 自选\n\n# 查看\n", encoding="utf-8")
+            with (
+                patch("stocks.list_parser.my_list_path", return_value=source),
+                patch("stocks.list_parser.my_list_example_path", return_value=example),
+            ):
                 count = copy_watchlist.sync_watchlist(target_path=target)
 
             self.assertEqual(count, 0)
