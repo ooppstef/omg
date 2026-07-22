@@ -41,6 +41,94 @@ class TestWatchAdviceHelpers(unittest.TestCase):
         self.assertIn("mfi", snap)
         self.assertIn("vs_ma20_pct", snap)
 
+    def test_fetch_tech_prefers_akshare(self):
+        fake = _fake_ohlcv(80)
+        with mock.patch(
+            "stocks.watch_advice._fetch_kline_akshare", return_value=fake
+        ) as mock_ak:
+            with mock.patch(
+                "stocks.watch_advice._fetch_kline_local",
+                side_effect=AssertionError("local should not run"),
+            ):
+                snap, err = watch_advice._fetch_tech_for_code(
+                    "300308", start="2025-01-01"
+                )
+        mock_ak.assert_called_once()
+        self.assertIsNone(err)
+        self.assertEqual(snap["source"], "akshare")
+        self.assertIn("macd_hist", snap)
+
+    def test_fetch_tech_falls_back_to_local(self):
+        fake = _fake_ohlcv(80)
+        with mock.patch(
+            "stocks.watch_advice._fetch_kline_akshare",
+            side_effect=RuntimeError("down"),
+        ):
+            with mock.patch(
+                "stocks.watch_advice._fetch_kline_local", return_value=fake
+            ):
+                snap, err = watch_advice._fetch_tech_for_code(
+                    "300308", start="2025-01-01"
+                )
+        self.assertIsNone(err)
+        self.assertEqual(snap["source"], "local_db")
+        self.assertTrue(snap.get("stale_warning"))
+
+    def test_fetch_tech_silent_empty_akshare_uses_local(self):
+        fake = _fake_ohlcv(80)
+        with mock.patch(
+            "stocks.watch_advice._fetch_kline_akshare",
+            return_value=pd.DataFrame(),
+        ):
+            with mock.patch(
+                "stocks.watch_advice._fetch_kline_local", return_value=fake
+            ):
+                snap, err = watch_advice._fetch_tech_for_code(
+                    "300308", start="2025-01-01"
+                )
+        self.assertIsNone(err)
+        self.assertEqual(snap["source"], "local_db")
+
+    def test_fetch_tech_short_local_falls_through_to_adata(self):
+        short = _fake_ohlcv(10)
+        long = _fake_ohlcv(80)
+        with mock.patch(
+            "stocks.watch_advice._fetch_kline_akshare",
+            return_value=pd.DataFrame(),
+        ):
+            with mock.patch(
+                "stocks.watch_advice._fetch_kline_local", return_value=short
+            ):
+                with mock.patch(
+                    "stocks.filter.db._fetch_one",
+                    return_value=("300308", [
+                        (
+                            "300308",
+                            row["trade_date"],
+                            row["open"],
+                            row["high"],
+                            row["low"],
+                            row["close"],
+                            row["volume"],
+                            row["amount"],
+                            row["change_pct"],
+                            row["turnover"],
+                        )
+                        for _, row in long.iterrows()
+                    ], None),
+                ):
+                    snap, err = watch_advice._fetch_tech_for_code(
+                        "300308", start="2025-01-01"
+                    )
+        self.assertIsNone(err)
+        self.assertEqual(snap["source"], "adata")
+
+    def test_sina_market_prefix(self):
+        self.assertEqual(watch_advice._sina_market_prefix("600000"), "sh")
+        self.assertEqual(watch_advice._sina_market_prefix("688347"), "sh")
+        self.assertEqual(watch_advice._sina_market_prefix("300308"), "sz")
+        self.assertEqual(watch_advice._sina_market_prefix("000892"), "sz")
+
     def test_board_match_rot_hot_crowd_etf(self):
         board = watch_advice._board_for_item(
             industry="半导体",

@@ -86,18 +86,159 @@ def _tech_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     return snap
 
 
-def _fetch_tech_for_code(code: str, *, start: str) -> tuple[Optional[dict], Optional[str]]:
+def _sina_market_prefix(code: str) -> str:
+    """A 股代码 -> 新浪日线市场前缀（sh/sz）。"""
+    c = str(code).strip()
+    if c.startswith(("5", "6", "9")):
+        return "sh"
+    return "sz"
+
+
+def _df_from_ak_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    # 统一列名
+    rename = {"date": "trade_date"}
+    out = out.rename(columns=rename)
+    if "trade_date" not in out.columns:
+        return pd.DataFrame()
+    out["trade_date"] = out["trade_date"].astype(str).str[:10]
+    out["code"] = code
+    if "change_pct" not in out.columns:
+        prev = out["close"].shift(1)
+        out["change_pct"] = (out["close"] / prev - 1.0) * 100
+    if "amount" not in out.columns:
+        out["amount"] = None
+    if "turnover" not in out.columns:
+        out["turnover"] = out.get("turnover", None)
+    cols = [
+        "code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "change_pct",
+        "turnover",
+    ]
+    for c in cols:
+        if c not in out.columns:
+            out[c] = None
+    return out[cols].sort_values("trade_date").reset_index(drop=True)
+
+
+def _fetch_kline_akshare(code: str, *, start: str) -> pd.DataFrame:
+    """新浪日线（akshare）；东财 push2his 在代理下常空返回。"""
+    import akshare as ak
+
+    from stocks.util import force_direct_http
+
+    symbol = f"{_sina_market_prefix(code)}{code}"
+    start_compact = start.replace("-", "")
+    end_compact = recent_date(0).replace("-", "")
+    with force_direct_http():
+        df = ak.stock_zh_a_daily(
+            symbol=symbol,
+            start_date=start_compact,
+            end_date=end_compact,
+            adjust="qfq",
+        )
+    return _df_from_ak_daily(df, code)
+
+
+def _fetch_kline_local(code: str, *, start: str) -> pd.DataFrame:
+    """本地 filter DailyQuote 回退（可能滞后）。"""
     from stocks.filter import db as filter_db
 
-    _code, rows, err = filter_db._fetch_one(code, start)
-    if err is not None:
-        return None, f"kline:{type(err).__name__}: {err}"
-    if not rows:
-        return None, "kline:empty"
     try:
-        return _tech_snapshot(_quote_df(rows)), None
+        with filter_db._conn() as conn:
+            rows = conn.execute(
+                "SELECT code, trade_date, open, high, low, close, volume, "
+                "amount, change_pct, turnover FROM DailyQuote "
+                "WHERE code=? AND trade_date>=? ORDER BY trade_date",
+                (code, start),
+            ).fetchall()
+    except Exception:
+        return pd.DataFrame()
+    return _quote_df(list(rows))
+
+
+_MIN_BARS = 30
+
+
+def _fetch_tech_for_code(code: str, *, start: str) -> tuple[Optional[dict], Optional[str]]:
+    """拉取日线并算技术快照。优先新浪，其次本地库；adata/东财 his 作末选。"""
+    errors: list[str] = []
+    # (source, frame) 按优先级尝试；不足 _MIN_BARS 的源会继续往后试
+    ordered: list[tuple[str, pd.DataFrame]] = []
+
+    try:
+        ak_df = _fetch_kline_akshare(code, start=start)
+        if ak_df is None or ak_df.empty:
+            errors.append("akshare:empty")
+        else:
+            ordered.append(("akshare", ak_df))
+            if len(ak_df) < _MIN_BARS:
+                errors.append(f"akshare:short:{len(ak_df)}")
     except Exception as exc:
-        return None, f"tech:{type(exc).__name__}: {exc}"
+        errors.append(f"akshare:{type(exc).__name__}")
+
+    need_more = not ordered or len(ordered[0][1]) < _MIN_BARS
+    if need_more:
+        local = _fetch_kline_local(code, start=start)
+        if local is None or local.empty:
+            errors.append("local:empty")
+        else:
+            ordered.append(("local_db", local))
+            if len(local) < _MIN_BARS:
+                errors.append(f"local:short:{len(local)}")
+
+    need_more = not any(len(df) >= _MIN_BARS for _, df in ordered)
+    if need_more:
+        try:
+            from stocks.filter import db as filter_db
+
+            _code, rows, err = filter_db._fetch_one(code, start)
+            if err is not None:
+                errors.append(f"adata:{type(err).__name__}")
+            elif not rows:
+                errors.append("adata:empty")
+            else:
+                ordered.append(("adata", _quote_df(rows)))
+        except Exception as exc:
+            errors.append(f"adata:{type(exc).__name__}")
+
+    # 先够长的，再按源优先级；同档比长度
+    pri = {"akshare": 0, "local_db": 1, "adata": 2}
+
+    def _rank(item: tuple[str, pd.DataFrame]) -> tuple:
+        src, frame = item
+        n = len(frame)
+        long_enough = 0 if n >= _MIN_BARS else 1
+        return (long_enough, pri.get(src, 9), -n)
+
+    ordered.sort(key=_rank)
+    last_tech_err: Optional[str] = None
+    for src, frame in ordered:
+        if frame is None or frame.empty:
+            continue
+        try:
+            snap = _tech_snapshot(frame)
+            snap["source"] = src
+            if src == "local_db":
+                snap["stale_warning"] = True
+            return snap, None
+        except Exception as exc:
+            last_tech_err = f"tech:{type(exc).__name__}: {exc}"
+            errors.append(f"{src}:{last_tech_err}")
+
+    detail = ",".join(errors) if errors else "unknown"
+    if last_tech_err:
+        return None, f"{last_tech_err}:{detail}"
+    return None, f"kline:empty:{detail}"
 
 
 def _build_hot_score_map(hot_data) -> dict[str, float]:
