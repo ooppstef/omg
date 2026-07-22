@@ -149,6 +149,13 @@ class TestTools(unittest.TestCase):
         self.assertIn("gainers", result["error"])
         mock_analyze.assert_not_called()
 
+    def test_watch_advice_rejects_non_boolean_skip_board(self):
+        with patch("stocks.watch_advice.analyze") as mock_analyze:
+            result = ai_tools.call("watch_advice", {"skip_board": "false"})
+        self.assertFalse(result["ok"])
+        self.assertIn("skip_board", result["error"])
+        mock_analyze.assert_not_called()
+
     @patch(
         "stocks.mood.analyze",
         return_value=[

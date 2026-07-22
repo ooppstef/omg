@@ -61,6 +61,24 @@ class TestRankFilter(unittest.TestCase):
         out = rank.filter_universe(df)
         self.assertEqual(list(out["code"]), ["600000"])
 
+    def test_includes_302_prefix_a_share(self):
+        df = _spot_rows(
+            [
+                {
+                    "代码": "302132",
+                    "名称": "中航成飞",
+                    "涨跌幅": 1.2,
+                    "最新价": 55.76,
+                    "成交额": 104_064_426,
+                    "换手率": 0.32,
+                }
+            ]
+        )
+
+        out = rank.filter_universe(df)
+
+        self.assertEqual(list(out["code"]), ["302132"])
+
 
 class TestRankAnalyze(unittest.TestCase):
     def _frame(self):
@@ -330,6 +348,45 @@ class TestRankAnalyze(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[0]["代码"], "600000")
         self.assertEqual(out.iloc[0]["名称"], "甲")
+
+    def test_fetch_em_spot_board_rejects_incomplete_pagination(self):
+        class FakeResp:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": self._data}
+
+        class FakeSession:
+            def __init__(self):
+                self.page = 0
+
+            def get(self, *args, **kwargs):
+                self.page += 1
+                if self.page == 1:
+                    return FakeResp(
+                        {
+                            "total": 150,
+                            "diff": [
+                                {
+                                    "f12": f"600{i:03d}",
+                                    "f14": f"股票{i}",
+                                    "f2": 10.0,
+                                    "f3": 1.0,
+                                    "f6": 1e8,
+                                    "f8": 2.0,
+                                }
+                                for i in range(100)
+                            ],
+                        }
+                    )
+                return FakeResp({"total": 150, "diff": []})
+
+        with self.assertRaisesRegex(ValueError, "分页不完整"):
+            rank._fetch_em_spot_board(rank._FS_SH, session=FakeSession())
 
     def test_live_concepts_follow_hot_name_order(self):
         hot = ["机器人", "半导体", "人工智能"]

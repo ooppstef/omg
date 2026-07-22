@@ -12,51 +12,56 @@ from stocks.util import force_direct_http
 
 
 class TestForceDirectHttp(unittest.TestCase):
-    def test_clears_proxy_env_and_forces_session_direct(self):
-        os.environ["http_proxy"] = "http://127.0.0.1:7897"
-        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+    def test_keeps_proxy_env_and_forces_session_direct(self):
+        proxy = "http://127.0.0.1:7897"
         seen = {}
 
-        def fake_request(self, method, url, **kwargs):
+        def fake_send(self, request, **kwargs):
             seen["proxies"] = kwargs.get("proxies")
+            seen["timeout"] = kwargs.get("timeout")
             seen["http_proxy"] = os.environ.get("http_proxy")
             seen["HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
             resp = MagicMock()
             resp.status_code = 200
             return resp
 
-        with patch.object(requests.Session, "request", fake_request):
-            with force_direct_http():
-                self.assertNotIn("http_proxy", os.environ)
-                self.assertNotIn("HTTPS_PROXY", os.environ)
-                self.assertEqual(os.environ.get("NO_PROXY"), "*")
-                requests.Session().request("GET", "https://82.push2.eastmoney.com/")
+        with patch.dict(
+            os.environ,
+            {"http_proxy": proxy, "HTTPS_PROXY": proxy, "ALL_PROXY": proxy},
+            clear=True,
+        ):
+            with patch.object(requests.Session, "send", fake_send):
+                with force_direct_http():
+                    self.assertEqual(os.environ.get("http_proxy"), proxy)
+                    self.assertEqual(os.environ.get("HTTPS_PROXY"), proxy)
+                    requests.Session().get("https://82.push2.eastmoney.com/")
 
-        self.assertEqual(seen["proxies"], {"http": None, "https": None})
-        self.assertIsNone(seen["http_proxy"])
-        self.assertIsNone(seen["HTTPS_PROXY"])
-        self.assertEqual(os.environ.get("http_proxy"), "http://127.0.0.1:7897")
-        self.assertEqual(os.environ.get("HTTPS_PROXY"), "http://127.0.0.1:7897")
+        self.assertEqual(dict(seen["proxies"]), {"http": "", "https": "", "all": ""})
+        self.assertEqual(seen["timeout"], 15)
+        self.assertEqual(seen["http_proxy"], proxy)
+        self.assertEqual(seen["HTTPS_PROXY"], proxy)
 
     def test_restores_env_and_request_on_exception(self):
-        os.environ["http_proxy"] = "http://127.0.0.1:7897"
-        original = requests.Session.request
-        with self.assertRaises(RuntimeError):
-            with force_direct_http():
-                self.assertNotIn("http_proxy", os.environ)
-                raise RuntimeError("boom")
-        self.assertEqual(os.environ.get("http_proxy"), "http://127.0.0.1:7897")
-        self.assertIs(requests.Session.request, original)
+        proxy = "http://127.0.0.1:7897"
+        with patch.dict(os.environ, {"http_proxy": proxy}, clear=True):
+            original = requests.Session.request
+            with self.assertRaises(RuntimeError):
+                with force_direct_http():
+                    self.assertEqual(os.environ.get("http_proxy"), proxy)
+                    raise RuntimeError("boom")
+            self.assertEqual(os.environ.get("http_proxy"), proxy)
+            self.assertIs(requests.Session.request, original)
 
     def test_nested_same_thread_restores_once(self):
-        os.environ["https_proxy"] = "http://127.0.0.1:7897"
-        original = requests.Session.request
-        with force_direct_http():
+        proxy = "http://127.0.0.1:7897"
+        with patch.dict(os.environ, {"https_proxy": proxy}, clear=True):
+            original = requests.Session.request
             with force_direct_http():
-                self.assertNotIn("https_proxy", os.environ)
-            self.assertNotIn("https_proxy", os.environ)
-        self.assertEqual(os.environ.get("https_proxy"), "http://127.0.0.1:7897")
-        self.assertIs(requests.Session.request, original)
+                with force_direct_http():
+                    self.assertEqual(os.environ.get("https_proxy"), proxy)
+                self.assertEqual(os.environ.get("https_proxy"), proxy)
+            self.assertEqual(os.environ.get("https_proxy"), proxy)
+            self.assertIs(requests.Session.request, original)
 
     def test_concurrent_enter_exit_leaves_request_intact(self):
         original = requests.Session.request
@@ -78,6 +83,58 @@ class TestForceDirectHttp(unittest.TestCase):
             self.assertFalse(t.is_alive())
         self.assertEqual(errors, [])
         self.assertIs(requests.Session.request, original)
+
+    def test_concurrent_direct_requests_are_not_serialized(self):
+        rendezvous = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def fake_request(self, method, url, **kwargs):
+            rendezvous.wait(timeout=1)
+            return MagicMock(status_code=200)
+
+        def worker():
+            try:
+                with force_direct_http():
+                    requests.Session().request("GET", "https://example.com/")
+            except BaseException as exc:  # noqa: BLE001 — collect for assertion
+                errors.append(exc)
+
+        with patch.object(requests.Session, "request", fake_request):
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
+
+        self.assertEqual(errors, [])
+
+    def test_context_does_not_disable_proxy_in_another_thread(self):
+        proxy = "http://127.0.0.1:7897"
+        entered = threading.Event()
+        release = threading.Event()
+        seen = {}
+
+        def holder():
+            with force_direct_http():
+                entered.set()
+                release.wait(timeout=3)
+
+        def fake_send(self, request, **kwargs):
+            seen["proxies"] = kwargs.get("proxies")
+            return MagicMock(status_code=200)
+
+        with patch.dict(os.environ, {"HTTPS_PROXY": proxy}, clear=True):
+            with patch.object(requests.Session, "send", fake_send):
+                thread = threading.Thread(target=holder)
+                thread.start()
+                self.assertTrue(entered.wait(timeout=1))
+                requests.Session().get("https://example.com/")
+                release.set()
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
+
+        self.assertEqual(seen["proxies"].get("https"), proxy)
 
 
     def test_fetch_spot_uses_direct_http(self):

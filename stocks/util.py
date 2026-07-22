@@ -9,15 +9,11 @@ import os
 import threading
 from typing import Iterator, Optional
 
-_PROXY_ENV_KEYS = (
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-)
 _DIRECT_HTTP_LOCK = threading.RLock()
+_DIRECT_HTTP_LOCAL = threading.local()
+_DIRECT_HTTP_USERS = 0
+_DIRECT_HTTP_ORIGINAL_REQUEST = None
+_DIRECT_HTTP_TIMEOUT_SECONDS = 15
 
 
 def env_int(name: str, default: int) -> int:
@@ -52,40 +48,41 @@ def fmt_chg(chg) -> str:
 
 @contextlib.contextmanager
 def force_direct_http() -> Iterator[None]:
-    """临时禁用环境代理，并强制 requests 直连。
+    """在当前线程内临时强制 requests 直连。
 
     东财等站点经本地 Clash/系统代理时常出现 ProxyError；
     crowd/etf 自建 Session 已设 trust_env=False，akshare 仍会读代理环境变量。
 
-    全局 monkeypatch / 改环境变量非线程安全，用 RLock 串行化整段 enter/exit。
+    仅在 enter/exit 时持锁，并用线程本地深度区分需要直连的调用；这样并发抓取
+    不会互相串行，也不会改写进程环境或影响其他线程的正常代理请求。
     """
     import requests
 
+    global _DIRECT_HTTP_ORIGINAL_REQUEST, _DIRECT_HTTP_USERS
+
     with _DIRECT_HTTP_LOCK:
-        saved_env = {
-            key: os.environ.pop(key) for key in _PROXY_ENV_KEYS if key in os.environ
-        }
-        saved_no_proxy = {
-            key: os.environ[key]
-            for key in ("NO_PROXY", "no_proxy")
-            if key in os.environ
-        }
-        os.environ["NO_PROXY"] = "*"
-        os.environ["no_proxy"] = "*"
+        if _DIRECT_HTTP_USERS == 0:
+            original_request = requests.Session.request
+            _DIRECT_HTTP_ORIGINAL_REQUEST = original_request
 
-        original_request = requests.Session.request
+            def _direct_request(self, method, url, **kwargs):
+                if getattr(_DIRECT_HTTP_LOCAL, "depth", 0) > 0:
+                    # 空字符串会覆盖环境变量和 Session.proxies；同时覆盖 ALL_PROXY。
+                    kwargs["proxies"] = {"http": "", "https": "", "all": ""}
+                    if kwargs.get("timeout") is None:
+                        kwargs["timeout"] = _DIRECT_HTTP_TIMEOUT_SECONDS
+                return original_request(self, method, url, **kwargs)
 
-        def _direct_request(self, method, url, **kwargs):
-            # 显式关闭代理，避免 trust_env / 残留 Session.proxies 再走本地代理
-            kwargs["proxies"] = {"http": None, "https": None}
-            return original_request(self, method, url, **kwargs)
+            requests.Session.request = _direct_request  # type: ignore[method-assign]
+        _DIRECT_HTTP_USERS += 1
+        _DIRECT_HTTP_LOCAL.depth = getattr(_DIRECT_HTTP_LOCAL, "depth", 0) + 1
 
-        requests.Session.request = _direct_request  # type: ignore[method-assign]
-        try:
-            yield
-        finally:
-            requests.Session.request = original_request  # type: ignore[method-assign]
-            for key in ("NO_PROXY", "no_proxy"):
-                os.environ.pop(key, None)
-            os.environ.update(saved_no_proxy)
-            os.environ.update(saved_env)
+    try:
+        yield
+    finally:
+        with _DIRECT_HTTP_LOCK:
+            _DIRECT_HTTP_LOCAL.depth -= 1
+            _DIRECT_HTTP_USERS -= 1
+            if _DIRECT_HTTP_USERS == 0:
+                requests.Session.request = _DIRECT_HTTP_ORIGINAL_REQUEST  # type: ignore[method-assign]
+                _DIRECT_HTTP_ORIGINAL_REQUEST = None

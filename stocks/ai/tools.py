@@ -83,6 +83,15 @@ def _int_arg(args: dict, name: str, default: int, maximum: int) -> int:
     return value
 
 
+def _bool_arg(args: dict, name: str, default: bool = False) -> bool:
+    raw = args.get(name)
+    if raw is None:
+        return default
+    if not isinstance(raw, bool):
+        raise ValueError(f"{name} 必须是布尔值")
+    return raw
+
+
 @contextlib.contextmanager
 def _quiet():
     """工具执行时吞掉模块输出，避免刷屏 REPL。"""
@@ -251,7 +260,7 @@ def _tool_rank(args: dict) -> dict:
 def _tool_watch_advice(args: dict) -> dict:
     import stocks.watch_advice as watch_advice
 
-    skip_board = bool(args.get("skip_board") or False)
+    skip_board = _bool_arg(args, "skip_board")
     with _quiet():
         data = watch_advice.analyze(skip_board=skip_board)
     if data is None:

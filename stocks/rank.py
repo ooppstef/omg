@@ -133,6 +133,7 @@ def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
     """分页拉取东财 clist 现货，返回统一列名 DataFrame。"""
     sess = session or _em_spot_session()
     rows: list[dict] = []
+    expected_total: Optional[int] = None
     for pn in range(1, 100):
         resp = sess.get(
             _EM_SPOT_URL,
@@ -151,9 +152,13 @@ def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
             proxies={"http": None, "https": None},
         )
         resp.raise_for_status()
-        diff = _normalize_em_diff(
-            ((resp.json() or {}).get("data") or {}).get("diff")
-        )
+        data = (resp.json() or {}).get("data") or {}
+        if expected_total is None:
+            try:
+                expected_total = int(data.get("total"))
+            except (TypeError, ValueError):
+                expected_total = None
+        diff = _normalize_em_diff(data.get("diff"))
         if not diff:
             break
         for item in diff:
@@ -171,6 +176,8 @@ def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
             )
         if len(diff) < 100:
             break
+    if expected_total is not None and len(rows) < expected_total:
+        raise ValueError(f"东财现货分页不完整: {len(rows)}/{expected_total}")
     return pd.DataFrame(rows)
 
 
