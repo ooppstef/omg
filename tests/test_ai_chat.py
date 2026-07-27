@@ -72,6 +72,12 @@ class TestLlmConfig(unittest.TestCase):
 
 
 class TestTools(unittest.TestCase):
+    def setUp(self):
+        ai_tools.clear_tool_cache()
+
+    def tearDown(self):
+        ai_tools.clear_tool_cache()
+
     def test_schemas_cover_expected_names(self):
         names = {s["function"]["name"] for s in ai_tools.schemas()}
         self.assertEqual(
@@ -155,6 +161,66 @@ class TestTools(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("skip_board", result["error"])
         mock_analyze.assert_not_called()
+
+    def test_watch_advice_defaults_skip_board_true(self):
+        with patch(
+            "stocks.watch_advice.analyze",
+            return_value={"items": [], "meta": {"skip_board": True}, "errors": []},
+        ) as mock_analyze:
+            result = ai_tools.call("watch_advice", {})
+        self.assertTrue(result["ok"])
+        mock_analyze.assert_called_once_with(skip_board=True)
+
+    @patch("stocks.util.recent_date", return_value="2026-07-17")
+    @patch("stocks.mood.analyze", return_value=[{"state": "主升"}])
+    def test_cacheable_tools_reuse_same_day_result(self, mock_analyze, _day):
+        ai_tools.clear_tool_cache()
+        first = ai_tools.call("mood", {"days": 5})
+        second = ai_tools.call("mood", {"days": 5})
+        self.assertTrue(first["ok"])
+        self.assertEqual(first, second)
+        mock_analyze.assert_called_once_with(days=5)
+        ai_tools.clear_tool_cache()
+
+    @patch("stocks.util.recent_date", return_value="2026-07-17")
+    @patch("stocks.watch_list.get_watch_list_current_price", return_value=[])
+    @patch("stocks.market.get_index_current_price")
+    def test_list_with_errors_is_not_cached(self, mock_index, _watch, _day):
+        row = types.SimpleNamespace(
+            code="000001",
+            name="上证指数",
+            price=3000.0,
+            change_percent=1.0,
+            amount=1,
+        )
+        mock_index.side_effect = [row, None, row]
+        first = ai_tools.call("list", {})
+        self.assertTrue(first["ok"])
+        self.assertTrue(first["data"]["errors"])
+        mock_index.reset_mock()
+        mock_index.side_effect = [row, row, row]
+        second = ai_tools.call("list", {})
+        self.assertTrue(second["ok"])
+        self.assertFalse(second["data"]["errors"])
+        self.assertEqual(mock_index.call_count, 3)
+
+    @patch("stocks.util.recent_date")
+    @patch("stocks.mood.analyze", return_value=[{"state": "主升"}])
+    def test_cache_write_skipped_after_day_rollover(self, mock_analyze, mock_day):
+        ai_tools.clear_tool_cache()
+        # lookup day17 -> write day18 (skip) -> lookup day18 -> write day18
+        mock_day.side_effect = [
+            "2026-07-17",
+            "2026-07-18",
+            "2026-07-18",
+            "2026-07-18",
+        ]
+        first = ai_tools.call("mood", {"days": 5})
+        self.assertTrue(first["ok"])
+        second = ai_tools.call("mood", {"days": 5})
+        self.assertTrue(second["ok"])
+        self.assertEqual(mock_analyze.call_count, 2)
+        ai_tools.clear_tool_cache()
 
     @patch(
         "stocks.mood.analyze",
@@ -381,6 +447,53 @@ class TestChatLoop(unittest.TestCase):
         self.assertEqual(messages[-1]["role"], "assistant")
 
     @patch("stocks.ai.tools.call")
+    def test_ask_once_runs_independent_tools_in_parallel_preserving_order(self, mock_call):
+        import threading
+        import time
+
+        barrier = threading.Barrier(2)
+        order_lock = threading.Lock()
+        started: list[str] = []
+
+        def _slow_call(name, args):
+            with order_lock:
+                started.append(name)
+            barrier.wait(timeout=2)
+            time.sleep(0.05)
+            return {"ok": True, "data": {"tool": name}, "error": None}
+
+        mock_call.side_effect = _slow_call
+        tcs = [
+            types.SimpleNamespace(
+                id="c1",
+                function=types.SimpleNamespace(name="mood", arguments="{}"),
+            ),
+            types.SimpleNamespace(
+                id="c2",
+                function=types.SimpleNamespace(name="style", arguments="{}"),
+            ),
+        ]
+        oai = MagicMock()
+        oai.chat.completions.create.side_effect = [
+            _Resp(_Msg(tool_calls=tcs)),
+            _Resp(_Msg(content="并行完成")),
+        ]
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+        text = ai_chat.ask_once(oai, "demo", messages)
+        self.assertEqual(text, "并行完成")
+        self.assertEqual(mock_call.call_count, 2)
+        tool_msgs = [m for m in messages if m.get("role") == "tool"]
+        self.assertEqual([m["tool_call_id"] for m in tool_msgs], ["c1", "c2"])
+        self.assertEqual(
+            json.loads(tool_msgs[0]["content"])["data"]["tool"], "mood"
+        )
+        self.assertEqual(
+            json.loads(tool_msgs[1]["content"])["data"]["tool"], "style"
+        )
+        # 两个 call 在对方完成前都已启动（并行证据）
+        self.assertEqual(set(started), {"mood", "style"})
+
+    @patch("stocks.ai.tools.call")
     def test_ask_once_responds_all_tool_calls_when_over_limit(self, mock_call):
         mock_call.return_value = {"ok": True, "data": 1, "error": None}
         tcs = [
@@ -559,15 +672,35 @@ class TestSkills(unittest.TestCase):
         self.assertIn("## 涨跌榜", skill["body"])
         self.assertIn("不含涨跌榜", skill["body"])
         self.assertIn("watch_advice", skill["body"])
+        self.assertIn("skip_board", skill["body"])
         self.assertIn("## 自选操作建议", skill["body"])
+        self.assertIn("用本轮", skill["body"])
+        self.assertIn("量价必写", skill["body"])
+        self.assertIn("vol_stance", skill["body"])
+        self.assertIn("有量价", skill["body"])
+        self.assertIn("## 明日观察推荐", skill["body"])
+        self.assertIn("严格 <5", skill["body"])
+        self.assertIn("0～4", skill["body"])
+        self.assertIn("跌侧", skill["body"])
+        self.assertIn("高门槛", skill["body"])
+        self.assertIn("牵动", skill["body"])
+        self.assertIn("暂无明确观察票", skill["body"])
+        self.assertIn("主要用于", skill["body"])
+        self.assertIn("关注建议」无具体代码", skill["body"])
+        self.assertNotIn("只在 `## 自选操作建议` 使用", skill["body"])
+        self.assertNotIn("关注清单", skill["body"])
         self.assertNotIn(
             "情绪 / 风格 / 轮动 / 热点 / 拥挤 / ETF / 涨跌榜 / 指数与自选",
             skill["body"],
         )
         self.assertIn("rank", ai_chat.SYSTEM)
         self.assertIn("watch_advice", ai_chat.SYSTEM)
+        self.assertIn("量价", ai_chat.SYSTEM)
+        self.assertIn("明日观察推荐", ai_chat.SYSTEM)
         self.assertIn("独立涨跌榜", ai_chat.SYSTEM_RESEARCH)
         self.assertIn("自选操作建议", ai_chat.SYSTEM_RESEARCH)
+        self.assertIn("明日观察推荐", ai_chat.SYSTEM_RESEARCH)
+        self.assertIn("量能", ai_chat.SYSTEM_RESEARCH)
         self.assertNotIn("或本轮用了 rank", ai_chat.SYSTEM_RESEARCH)
 
     def test_resolve_auto_from_prompt(self):

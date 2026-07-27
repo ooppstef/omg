@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from stocks.ai import skills as ai_skills
@@ -22,17 +23,19 @@ SYSTEM = """你是 A 股行情助手，运行在 omg chat 中。
 1. 行情结论必须来自 tools（mood/style/rot/crowd/etf/hot/list/rank/watch_advice），不要自行编造涨跌幅或阶段。
 2. 需要外部新闻/公告时用 web_search。
 3. 用中文；先结论，再依据、风险，并可给操作建议与关注建议。信息要密：名称 + 1～2 个关键数字/对比。
-4. 控制篇幅：宁短勿水。不要大段表格或逐日罗列；只保留拐点/极值/代表项。
-5. 操作/关注建议必须能回溯到刚取到的 tool 证据；用「宜/不宜/优先观察」表述。
-6. 禁止：具体仓位比例、目标价、下单指令、保证收益话术。这不是投顾荐股。
+4. **量价**：有量能证据时（rel_vol/vol_stance、成交额、ETF 量比）必须写进强弱判断；价涨缩量、指数强个股无量落后要点破。
+5. 若 skill 要求「明日观察推荐」：可列合计 ≤4 只「观察/跟踪」标的（涨跌皆可，跌侧须高门槛），仍禁止买入/仓位%/目标价。
+6. 控制篇幅：宁短勿水。不要大段表格或逐日罗列；只保留拐点/极值/代表项。
+7. 操作/关注建议必须能回溯到刚取到的 tool 证据；用「宜/不宜/优先观察」表述。
+8. 禁止：具体仓位比例、目标价、下单指令、保证收益话术。这不是投顾荐股。
 """
 
 SYSTEM_RESEARCH = """当前为 research 模式：
 1. 先规划维度，再尽量多调用 tools / web_search 取证，缺口再补调。
-2. 最终输出默认五节：## 结论 / ## 依据 / ## 风险 / ## 操作建议 / ## 关注建议；仅当 skill 要求独立涨跌榜点评时，在依据与风险之间增加 ## 涨跌榜，且勿把 rank 细节嵌进依据；若 skill 要求自选操作建议，在涨跌榜（若有）与风险之间增加 ## 自选操作建议（逐票，证据来自 watch_advice）；其他 skill 仍按其模板（例如主题研究可将 rank 留在依据）。注明用过的 tool。
-3. 密度：结论 3～5 句；依据每维 2～4 句；涨跌榜（若有）3～6 句主题归类；自选操作建议（若有）每票一小段；风险 3～5 条；操作建议 3～5 条；关注建议 3～5 条。
+2. 最终输出默认五节：## 结论 / ## 依据 / ## 风险 / ## 操作建议 / ## 关注建议；仅当 skill 要求独立涨跌榜点评时，在依据与风险之间增加 ## 涨跌榜，且勿把 rank 细节嵌进依据；若 skill 要求自选操作建议，在涨跌榜（若有）与风险之间增加 ## 自选操作建议（逐票，证据来自 watch_advice）；若 skill 要求明日观察推荐，放在关注建议之后（涨侧+跌侧合计 0～4 只具体股票，可暂无；与关注建议的指标清单区分；跌侧仅高门槛且须写牵动机制）；其他 skill 仍按其模板（例如主题研究可将 rank 留在依据）。注明用过的 tool。
+3. 密度：结论 3～5 句；依据每维 2～4 句（含量价一句若有证据）；涨跌榜（若有）3～6 句主题归类；自选操作建议（若有）每票一小段且技术必含量能；风险 3～5 条；操作建议 3～5 条；关注建议 3～5 条（指标/条件，禁止个股清单）；明日观察推荐（若有）0～4 只或明示暂无。
 4. 操作建议=基于证据的行为倾向（如不宜追拥挤科技、可偏向红利/防御观察、等待情绪拐点确认等），不要写成买卖点。
-5. 关注建议=接下来盯什么（涨停家数、某行业拥挤分位、代表 ETF 状态、自选背离等），尽量可验证。
+5. 关注建议=接下来盯什么（涨停家数、某行业拥挤分位、代表 ETF 状态、自选背离、主线量能能否续放等），尽量可验证；不要在此节列个股推荐清单。
 6. 禁止空泛定调、完整多日大表、ETF 全清单、仓位%/目标价。冲突结构必须写明。
 """
 
@@ -138,22 +141,50 @@ def ask_once(
 
         # 必须为每个 tool_call 写入一条 tool 消息，否则违反 API 契约
         messages.append(_assistant_message(msg))
-        for tc in msg.tool_calls:
+        tool_calls = list(msg.tool_calls)
+        results: list[dict | None] = [None] * len(tool_calls)
+        pending: list[tuple[int, Any, dict]] = []
+
+        for i, tc in enumerate(tool_calls):
             if used >= limit:
-                result = _LIMIT_RESULT
+                results[i] = _LIMIT_RESULT
+                continue
+            used += 1
+            args, error = _parse_args(tc.function.arguments)
+            if error:
+                results[i] = {"ok": False, "data": None, "error": error}
             else:
-                used += 1
-                args, error = _parse_args(tc.function.arguments)
-                result = (
-                    {"ok": False, "data": None, "error": error}
-                    if error
-                    else ai_tools.call(tc.function.name, args)
-                )
+                pending.append((i, tc, args))
+
+        if len(pending) == 1:
+            i, tc, args = pending[0]
+            results[i] = ai_tools.call(tc.function.name, args)
+        elif pending:
+            # 同轮独立 tools 并行；消息顺序仍按 tool_calls 原序
+            with ai_tools.quiet_batch():
+                workers = min(len(pending), 8)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {
+                        pool.submit(ai_tools.call, tc.function.name, args): i
+                        for i, tc, args in pending
+                    }
+                    for fut in as_completed(futures):
+                        i = futures[fut]
+                        try:
+                            results[i] = fut.result()
+                        except Exception as e:
+                            results[i] = {
+                                "ok": False,
+                                "data": None,
+                                "error": str(e),
+                            }
+
+        for i, tc in enumerate(tool_calls):
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": ai_tools.dumps(result),
+                    "content": ai_tools.dumps(results[i]),
                 }
             )
 

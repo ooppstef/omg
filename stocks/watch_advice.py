@@ -38,6 +38,19 @@ _TECH_FIELDS = (
 )
 
 
+def _vol_stance(rel_vol: float | None) -> str | None:
+    """把 rel_vol 落成可读量能标签，供复盘直接引用。"""
+    if rel_vol is None:
+        return None
+    if rel_vol >= 1.5:
+        return "明显放量"
+    if rel_vol >= 1.2:
+        return "量能放大"
+    if rel_vol >= 0.85:
+        return "量能大致持平"
+    return "量能偏弱"
+
+
 def _quote_df(rows: list[tuple]) -> pd.DataFrame:
     """filter.db._fetch_one 的 rows → OHLCV DataFrame。"""
     if not rows:
@@ -83,6 +96,10 @@ def _tech_snapshot(df: pd.DataFrame) -> dict[str, Any]:
             snap[f"vs_{ma_key}_pct"] = round((close / ma - 1.0) * 100, 2)
         else:
             snap[f"vs_{ma_key}_pct"] = None
+    # 原始量/额便于对照；vol_stance 给模型少算一步
+    snap["volume"] = finite_float(last.get("volume"))
+    snap["amount"] = finite_float(last.get("amount"))
+    snap["vol_stance"] = _vol_stance(snap.get("rel_vol"))
     return snap
 
 
@@ -357,7 +374,7 @@ def _board_for_item(
 
 def analyze(
     *,
-    skip_board: bool = False,
+    skip_board: bool = True,
     max_n: int = MAX_WATCH,
     watch_rows: Optional[list] = None,
     index_rows: Optional[list] = None,
@@ -639,6 +656,11 @@ def analyze(
                     getattr(r, "change_percent", None)
                     if not isinstance(r, dict)
                     else r.get("change_percent", r.get("change_pct"))
+                ),
+                "amount": finite_float(
+                    getattr(r, "amount", None)
+                    if not isinstance(r, dict)
+                    else r.get("amount")
                 ),
             }
             for r in (index_rows or [])

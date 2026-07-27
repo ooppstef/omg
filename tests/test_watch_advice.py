@@ -40,6 +40,18 @@ class TestWatchAdviceHelpers(unittest.TestCase):
         self.assertIn("adx", snap)
         self.assertIn("mfi", snap)
         self.assertIn("vs_ma20_pct", snap)
+        self.assertIn("rel_vol", snap)
+        self.assertIn("vol_stance", snap)
+        self.assertIn("volume", snap)
+        self.assertIn("amount", snap)
+        self.assertIsNotNone(snap["vol_stance"])
+
+    def test_vol_stance_thresholds(self):
+        self.assertEqual(watch_advice._vol_stance(1.6), "明显放量")
+        self.assertEqual(watch_advice._vol_stance(1.3), "量能放大")
+        self.assertEqual(watch_advice._vol_stance(1.0), "量能大致持平")
+        self.assertEqual(watch_advice._vol_stance(0.5), "量能偏弱")
+        self.assertIsNone(watch_advice._vol_stance(None))
 
     def test_fetch_tech_prefers_akshare(self):
         fake = _fake_ohlcv(80)
@@ -373,10 +385,23 @@ class TestWatchAdviceTool(unittest.TestCase):
         }
         with mock.patch(
             "stocks.watch_advice.analyze", return_value=payload
-        ):
+        ) as mock_analyze:
             result = ai_tools.call("watch_advice", {})
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["items"][0]["code"], "600000")
+        mock_analyze.assert_called_once_with(skip_board=True)
+
+    def test_tool_default_skip_board_true_in_schema(self):
+        from stocks.ai import tools as ai_tools
+
+        schema = next(
+            s for s in ai_tools.schemas() if s["function"]["name"] == "watch_advice"
+        )
+        self.assertIn("默认", schema["function"]["description"])
+        self.assertIn(
+            "true",
+            schema["function"]["parameters"]["properties"]["skip_board"]["description"].lower(),
+        )
 
 
 if __name__ == "__main__":

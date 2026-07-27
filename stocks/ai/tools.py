@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import math
@@ -92,9 +93,33 @@ def _bool_arg(args: dict, name: str, default: bool = False) -> bool:
     return raw
 
 
+# 并行 tool 批次外层已重定向 stdout 时，内层 _quiet 跳过，避免锁串行化
+_BATCH_QUIET = 0
+
+
+@contextlib.contextmanager
+def quiet_batch():
+    """整批并行 tool 共用一次 stdout/stderr 重定向，使内层 _quiet 不再抢锁。"""
+    global _BATCH_QUIET
+    buf = io.StringIO()
+    with (
+        _STDOUT_LOCK,
+        contextlib.redirect_stdout(buf),
+        contextlib.redirect_stderr(buf),
+    ):
+        _BATCH_QUIET += 1
+        try:
+            yield
+        finally:
+            _BATCH_QUIET -= 1
+
+
 @contextlib.contextmanager
 def _quiet():
     """工具执行时吞掉模块输出，避免刷屏 REPL。"""
+    if _BATCH_QUIET > 0:
+        yield
+        return
     buf = io.StringIO()
     with (
         _STDOUT_LOCK,
@@ -260,7 +285,8 @@ def _tool_rank(args: dict) -> dict:
 def _tool_watch_advice(args: dict) -> dict:
     import stocks.watch_advice as watch_advice
 
-    skip_board = _bool_arg(args, "skip_board")
+    # 默认跳过板面重拉：日复盘应已调 mood/style/rot/hot/crowd/etf，避免双重全量扫描
+    skip_board = _bool_arg(args, "skip_board", default=True)
     with _quiet():
         data = watch_advice.analyze(skip_board=skip_board)
     if data is None:
@@ -281,6 +307,79 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "watch_advice": _tool_watch_advice,
     "web_search": _tool_web_search,
 }
+
+# 同进程同交易日缓存只读行情 tools，避免日复盘重复拉数
+_CACHEABLE_TOOLS = frozenset(
+    {"mood", "style", "rot", "crowd", "etf", "hot"}
+)
+_TOOL_CACHE: dict[tuple[str, str], dict] = {}
+_TOOL_CACHE_DAY: str | None = None
+_TOOL_CACHE_LOCK = threading.Lock()
+
+
+def _cache_key(name: str, args: dict | None) -> tuple[str, str]:
+    payload = json.dumps(args or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return name, payload
+
+
+def clear_tool_cache() -> None:
+    """测试或跨日强制刷新。"""
+    global _TOOL_CACHE_DAY
+    with _TOOL_CACHE_LOCK:
+        _TOOL_CACHE.clear()
+        _TOOL_CACHE_DAY = None
+
+
+def _should_cache(result: dict) -> bool:
+    """只缓存完整成功结果；带 errors 的降级快照不冻住，便于下轮重试。"""
+    if not result.get("ok"):
+        return False
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("errors"):
+        return False
+    return True
+
+
+def call(name: str, args: dict | None = None) -> dict:
+    """执行 tool，统一返回 {ok, data, error}。"""
+    handler = _HANDLERS.get(name)
+    if handler is None:
+        return _err(f"未知 tool: {name}")
+
+    use_cache = name in _CACHEABLE_TOOLS
+    today: str | None = None
+    key: tuple[str, str] | None = None
+    if use_cache:
+        from stocks.util import recent_date
+
+        today = recent_date(0)
+        key = _cache_key(name, args)
+        with _TOOL_CACHE_LOCK:
+            global _TOOL_CACHE_DAY
+            if _TOOL_CACHE_DAY != today:
+                _TOOL_CACHE.clear()
+                _TOOL_CACHE_DAY = today
+            cached = _TOOL_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    try:
+        result = handler(args or {})
+    except Exception as e:
+        return _err(str(e))
+
+    if use_cache and key is not None and today is not None and _should_cache(result):
+        from stocks.util import recent_date
+
+        with _TOOL_CACHE_LOCK:
+            now = recent_date(0)
+            if _TOOL_CACHE_DAY != now:
+                _TOOL_CACHE.clear()
+                _TOOL_CACHE_DAY = now
+            # 慢 handler 跨日：丢弃写入，避免把旧日结果冻进新日桶
+            if now == today:
+                _TOOL_CACHE[key] = copy.deepcopy(result)
+    return result
 
 
 def schemas() -> list[dict]:
@@ -413,7 +512,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "rank",
-                "description": "个股涨幅 Top / 跌幅 Top（含行业与热点概念标签）",
+                "description": "个股涨幅 Top / 跌幅 Top（含行业与热点概念标签、成交额；便于量价归类）",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -437,13 +536,13 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "watch_advice",
-                "description": "自选股逐票取证：技术指标全套快照 + 行业/概念 + 板块走势对齐 + 大盘锚",
+                "description": "自选股逐票取证：默认仅技术全套快照+行业/概念标签（含 rel_vol/vol_stance 量能）；板走势/大盘请用本轮 mood/style/rot/hot/crowd/etf 对齐",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "skip_board": {
                             "type": "boolean",
-                            "description": "为 true 时跳过 rot/hot/crowd/etf/情绪风格对齐（仅技术+标签）",
+                            "description": "默认 true。为 false 时额外拉 rot/hot/crowd/etf/情绪风格做板面对齐（很慢，日复盘勿开）",
                         },
                     },
                 },
@@ -470,17 +569,6 @@ def schemas() -> list[dict]:
             },
         },
     ]
-
-
-def call(name: str, args: dict | None = None) -> dict:
-    """执行 tool，统一返回 {ok, data, error}。"""
-    handler = _HANDLERS.get(name)
-    if handler is None:
-        return _err(f"未知 tool: {name}")
-    try:
-        return handler(args or {})
-    except Exception as e:
-        return _err(str(e))
 
 
 def dumps(result: dict) -> str:
