@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 from stocks.filter import db
 
 
@@ -34,6 +36,22 @@ class TestCoverage(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
             ("999999", "2026-07-16", 1, 1, 1, 1, 1, 1, 0, 0),
+        )
+        self.conn.commit()
+
+        _, count, ratio = db._check_coverage(
+            self.conn,
+            expected=["000001", "000002"],
+            expected_date="2026-07-16",
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(ratio, 0.5)
+
+    def test_coverage_does_not_count_invalid_ohlcv_rows(self):
+        self.conn.execute(
+            "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("000002", "2026-07-16", 0, 0, 0, 0, 0, 0, 0, 0),
         )
         self.conn.commit()
 
@@ -117,6 +135,192 @@ class TestCoverage(unittest.TestCase):
 
 
 class TestBatchFetch(unittest.TestCase):
+    @patch("stocks.filter.db.adata.stock.market.get_market")
+    def test_fetch_one_rejects_invalid_ohlcv_rows(self, get_market):
+        get_market.return_value = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-16",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                    "change_pct": 2.0,
+                    "turnover_ratio": 1.0,
+                },
+                {
+                    "trade_date": "2026-07-17",
+                    "open": 10.0,
+                    "high": 9.9,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                    "change_pct": 2.0,
+                    "turnover_ratio": 1.0,
+                },
+                {
+                    "trade_date": "2026-07-18",
+                    "open": None,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                    "change_pct": 2.0,
+                    "turnover_ratio": 1.0,
+                },
+                {
+                    "trade_date": "2026-07-19",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 0.0,
+                    "amount": 0.0,
+                    "change_pct": 2.0,
+                    "turnover_ratio": 0.0,
+                },
+            ]
+        )
+
+        code, rows, error = db._fetch_one("600000", "2026-01-01")
+
+        self.assertEqual(code, "600000")
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "2026-07-16")
+
+    @patch("stocks.filter.db.adata.stock.market.get_market")
+    def test_fetch_one_prefers_existing_turnover_column(self, get_market):
+        get_market.return_value = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-16",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                    "change_pct": 2.0,
+                    "turnover": 1.5,
+                    "turnover_ratio": 99.0,
+                }
+            ]
+        )
+
+        _, rows, error = db._fetch_one("600000", "2026-01-01")
+
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][-1], 1.5)
+
+    @patch("stocks.filter.db.adata.stock.market.get_market")
+    def test_fetch_one_keeps_valid_ohlcv_when_auxiliary_fields_are_missing(
+        self,
+        get_market,
+    ):
+        get_market.return_value = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-15",
+                    "open": 10.0,
+                    "high": 10.2,
+                    "low": 9.8,
+                    "close": 10.0,
+                    "volume": 100.0,
+                    "amount": None,
+                    "change_pct": 0.0,
+                    "turnover_ratio": None,
+                },
+                {
+                    "trade_date": "2026-07-16",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.9,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": None,
+                    "change_pct": None,
+                    "turnover_ratio": None,
+                },
+            ]
+        )
+
+        _, rows, error = db._fetch_one("600000", "2026-01-01")
+
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 2)
+        self.assertIsNone(rows[-1][7])
+        self.assertAlmostEqual(rows[-1][8], 2.0)
+        self.assertIsNone(rows[-1][9])
+
+    def test_sanitize_rejects_impossible_calendar_date(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "code": "600000",
+                    "trade_date": "2026-02-30",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                    "change_pct": 2.0,
+                    "turnover": 1.5,
+                }
+            ]
+        )
+
+        self.assertTrue(db._sanitize_quote_frame(frame).empty)
+
+    def test_load_all_filters_invalid_rows_before_minimum_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "quotes.db"
+            with sqlite3.connect(database) as conn:
+                conn.execute(db.DDL)
+                conn.executemany(
+                    "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        (
+                            "600000",
+                            "2026-07-16",
+                            10.0,
+                            10.5,
+                            9.8,
+                            10.2,
+                            100.0,
+                            1000.0,
+                            2.0,
+                            1.0,
+                        ),
+                        (
+                            "600000",
+                            "2026-07-17",
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ),
+                    ],
+                )
+
+            with patch(
+                "stocks.filter.db._conn",
+                side_effect=lambda: sqlite3.connect(database),
+            ):
+                loaded = db.load_all(min_rows=2)
+
+        self.assertNotIn("600000", loaded)
+
     def test_ensure_data_serializes_the_complete_check_and_repair_flow(self):
         self.assertTrue(
             hasattr(db.ensure_data, "__wrapped__"),

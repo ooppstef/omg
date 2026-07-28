@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -12,6 +14,7 @@ from stocks.util import finite_float, recent_date
 MAX_WATCH = 30
 # 足够覆盖 MA60 / MACD 预热
 _KLINE_LOOKBACK_DAYS = 180
+_TZ = ZoneInfo("Asia/Shanghai")
 
 _TECH_FIELDS = (
     "close",
@@ -38,8 +41,56 @@ _TECH_FIELDS = (
 )
 
 
+def _as_of_date(value) -> Optional[str]:
+    if value is None:
+        return None
+    parsed = pd.to_datetime(str(value), errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _source_dates(
+    items: list[dict[str, Any]],
+    indexes: list[dict[str, Any]],
+    market: dict[str, Any],
+) -> list[str]:
+    values = [
+        *(item.get("quote_as_of") for item in items),
+        *(
+            (item.get("tech") or {}).get("as_of")
+            for item in items
+            if isinstance(item.get("tech"), dict)
+        ),
+        *(row.get("as_of") for row in indexes),
+        (market.get("mood") or {}).get("trade_date"),
+        (market.get("style") or {}).get("as_of"),
+        market.get("hot_as_of"),
+    ]
+    for item in items:
+        board = item.get("board")
+        if not isinstance(board, dict):
+            continue
+        for section, date_key in (
+            ("rot", "as_of"),
+            ("crowd", "trade_date"),
+            ("etf", "as_of"),
+        ):
+            evidence = board.get(section)
+            if isinstance(evidence, dict):
+                values.append(evidence.get(date_key))
+    return sorted(
+        {
+            as_of
+            for value in values
+            if (as_of := _as_of_date(value)) is not None
+        }
+    )
+
+
 def _vol_stance(rel_vol: float | None) -> str | None:
     """把 rel_vol 落成可读量能标签，供复盘直接引用。"""
+    rel_vol = finite_float(rel_vol)
     if rel_vol is None:
         return None
     if rel_vol >= 1.5:
@@ -120,15 +171,39 @@ def _df_from_ak_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
     out = out.rename(columns=rename)
     if "trade_date" not in out.columns:
         return pd.DataFrame()
-    out["trade_date"] = out["trade_date"].astype(str).str[:10]
     out["code"] = code
-    if "change_pct" not in out.columns:
-        prev = out["close"].shift(1)
-        out["change_pct"] = (out["close"] / prev - 1.0) * 100
     if "amount" not in out.columns:
         out["amount"] = None
     if "turnover" not in out.columns:
-        out["turnover"] = out.get("turnover", None)
+        out["turnover"] = None
+    if "change_pct" not in out.columns:
+        out["change_pct"] = None
+
+    required = ("open", "high", "low", "close", "volume")
+    if not set(required).issubset(out.columns):
+        return pd.DataFrame()
+    parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
+    for column in (*required, "amount", "change_pct", "turnover"):
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out = out.replace([float("inf"), float("-inf")], pd.NA)
+
+    valid = parsed_dates.notna()
+    valid &= (out[list(required[:4])] > 0).all(axis=1)
+    valid &= out["volume"] > 0
+    valid &= out["high"] >= out[["open", "close", "low"]].max(axis=1)
+    valid &= out["low"] <= out[["open", "close", "high"]].min(axis=1)
+    out = out.loc[valid].copy()
+    if out.empty:
+        return pd.DataFrame()
+
+    out["trade_date"] = parsed_dates.loc[valid].dt.strftime("%Y-%m-%d")
+    out.loc[out["amount"] < 0, "amount"] = pd.NA
+    out.loc[out["turnover"] < 0, "turnover"] = pd.NA
+    out = out.drop_duplicates(subset=["trade_date"], keep="last")
+    out = out.sort_values("trade_date").reset_index(drop=True)
+    computed_change = out["close"].pct_change(fill_method=None) * 100
+    out["change_pct"] = out["change_pct"].fillna(computed_change)
+
     cols = [
         "code",
         "trade_date",
@@ -141,10 +216,7 @@ def _df_from_ak_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
         "change_pct",
         "turnover",
     ]
-    for c in cols:
-        if c not in out.columns:
-            out[c] = None
-    return out[cols].sort_values("trade_date").reset_index(drop=True)
+    return out[cols]
 
 
 def _fetch_kline_akshare(code: str, *, start: str) -> pd.DataFrame:
@@ -180,7 +252,7 @@ def _fetch_kline_local(code: str, *, start: str) -> pd.DataFrame:
             ).fetchall()
     except Exception:
         return pd.DataFrame()
-    return _quote_df(list(rows))
+    return filter_db._sanitize_quote_frame(_quote_df(list(rows)))
 
 
 _MIN_BARS = 30
@@ -265,10 +337,9 @@ def _build_hot_score_map(hot_data) -> dict[str, float]:
     latest = max(hot_data.keys())
     out: dict[str, float] = {}
     for name, score in hot_data.get(latest) or []:
-        try:
-            out[str(name)] = float(score)
-        except (TypeError, ValueError):
-            continue
+        value = finite_float(score)
+        if value is not None:
+            out[str(name)] = value
     return out
 
 
@@ -285,6 +356,7 @@ def _index_rot(rot_data: Optional[dict]) -> dict[str, dict[str, Any]]:
                 "group": group,
                 "score": finite_float(row.get("score")),
                 "reason": row.get("reason"),
+                "as_of": row.get("as_of"),
             }
     return indexed
 
@@ -333,6 +405,9 @@ def _match_etf(
             "short_state": row.get("short_state"),
             "mid_state": row.get("mid_state"),
             "change_pct": finite_float(row.get("change_pct")),
+            "as_of": row.get("as_of"),
+            "target_as_of": row.get("target_as_of"),
+            "volume_status": row.get("volume_status"),
             "matched_by": hit,
         }
         if best is None:
@@ -535,6 +610,7 @@ def analyze(
 
                 style_res = style.analyze(days=5)
                 market_payload["style"] = {
+                    "as_of": style_res.get("as_of"),
                     "state": style_res.get("state"),
                     "reasons": list(style_res.get("reasons") or [])[:3],
                 }
@@ -567,6 +643,8 @@ def analyze(
                 hot_data = None
                 errors.append(f"hot:{type(exc).__name__}")
         hot_scores = _build_hot_score_map(hot_data)
+        if isinstance(hot_data, dict) and hot_data:
+            market_payload["hot_as_of"] = max(hot_data)
         if not hot_scores and not any(e.startswith("hot:") for e in errors):
             errors.append("hot:empty")
 
@@ -602,6 +680,7 @@ def analyze(
             name = str(getattr(row, "name", "") or "")
             price = finite_float(getattr(row, "price", None))
             change_pct = finite_float(getattr(row, "change_percent", None))
+            quote_as_of = getattr(row, "as_of", None)
         else:
             code = str(row.get("code") or "").strip()
             name = str(row.get("name") or "")
@@ -609,6 +688,7 @@ def analyze(
             change_pct = finite_float(
                 row.get("change_percent", row.get("change_pct"))
             )
+            quote_as_of = row.get("as_of", row.get("trade_date"))
         item_errors: list[str] = []
         if code in tech_errors:
             item_errors.append(tech_errors[code])
@@ -633,6 +713,7 @@ def analyze(
                 "name": name,
                 "price": price,
                 "change_pct": change_pct,
+                "quote_as_of": _as_of_date(quote_as_of),
                 "industry": industry,
                 "concepts": concepts,
                 "tech": tech,
@@ -641,30 +722,44 @@ def analyze(
             }
         )
 
+    indexes_payload = [
+        {
+            "code": getattr(r, "code", None)
+            or (r.get("code") if isinstance(r, dict) else None),
+            "name": getattr(r, "name", None)
+            or (r.get("name") if isinstance(r, dict) else None),
+            "price": finite_float(
+                getattr(r, "price", None)
+                if not isinstance(r, dict)
+                else r.get("price")
+            ),
+            "change_percent": finite_float(
+                getattr(r, "change_percent", None)
+                if not isinstance(r, dict)
+                else r.get("change_percent", r.get("change_pct"))
+            ),
+            "amount": finite_float(
+                getattr(r, "amount", None)
+                if not isinstance(r, dict)
+                else r.get("amount")
+            ),
+            "as_of": (
+                _as_of_date(
+                    getattr(r, "as_of", None)
+                    if not isinstance(r, dict)
+                    else r.get("as_of", r.get("trade_date"))
+                )
+            ),
+        }
+        for r in (index_rows or [])
+    ]
+    source_dates = _source_dates(items, indexes_payload, market_payload)
+
     return {
-        "as_of": recent_date(0),
-        "indexes": [
-            {
-                "code": getattr(r, "code", None) or (r.get("code") if isinstance(r, dict) else None),
-                "name": getattr(r, "name", None) or (r.get("name") if isinstance(r, dict) else None),
-                "price": finite_float(
-                    getattr(r, "price", None)
-                    if not isinstance(r, dict)
-                    else r.get("price")
-                ),
-                "change_percent": finite_float(
-                    getattr(r, "change_percent", None)
-                    if not isinstance(r, dict)
-                    else r.get("change_percent", r.get("change_pct"))
-                ),
-                "amount": finite_float(
-                    getattr(r, "amount", None)
-                    if not isinstance(r, dict)
-                    else r.get("amount")
-                ),
-            }
-            for r in (index_rows or [])
-        ],
+        "as_of": source_dates[0] if len(source_dates) == 1 else None,
+        "as_of_dates": source_dates,
+        "observed_at": datetime.datetime.now(_TZ).isoformat(timespec="seconds"),
+        "indexes": indexes_payload,
         "market": market_payload,
         "items": items,
         "meta": {

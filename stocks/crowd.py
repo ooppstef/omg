@@ -1,4 +1,3 @@
-import datetime
 import math
 import os
 import re
@@ -11,7 +10,7 @@ import pandas as pd
 import requests
 
 from stocks.universe import A_SHARE_CODE_PREFIXES
-from stocks.util import env_int, fmt_chg
+from stocks.util import env_int, finite_float, fmt_chg, recent_date
 
 # 行业拥挤度：东财行业板块（BK）。
 # 历史 K 线走 push2his；若当前网络不可用，则用「同名」同花顺行业指数（881）作成交额代理
@@ -27,7 +26,8 @@ LOOKBACK_DAYS = LOOKBACK_YEARS * TRADING_DAYS_PER_YEAR  # 750
 MAX_HISTORY_DAYS = MAX_HISTORY_YEARS * TRADING_DAYS_PER_YEAR  # 2500
 
 SH_INDEX = "000001"
-SZ_INDEX = "399001"
+# 深证成指 399001 仅覆盖 500 只样本；成交额分母需要覆盖深市全部股票。
+SZ_INDEX = "399106"
 
 INDUSTRY_EXCLUDE = set()
 
@@ -50,12 +50,9 @@ def _session() -> requests.Session:
 
 
 def compute_share(concept_amount, market_amount) -> Optional[float]:
-    try:
-        c = float(concept_amount)
-        m = float(market_amount)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(c) or not math.isfinite(m) or m <= 0:
+    c = finite_float(concept_amount)
+    m = finite_float(market_amount)
+    if c is None or m is None or c < 0 or m <= 0 or c > m:
         return None
     return c / m
 
@@ -65,10 +62,19 @@ def rolling_mean(series: pd.Series, window: int) -> pd.Series:
 
 
 def percentile_rank(value: float, history: pd.Series) -> Optional[float]:
-    hist = pd.to_numeric(history, errors="coerce").dropna()
-    if hist.empty or value is None or not math.isfinite(float(value)):
+    hist = (
+        pd.to_numeric(history, errors="coerce")
+        .replace([math.inf, -math.inf], pd.NA)
+        .dropna()
+    )
+    score = finite_float(value)
+    if hist.empty or score is None:
         return None
-    return float((hist < float(value)).sum() / len(hist) * 100.0)
+    # 取 strict(<) 与 weak(<=) 的均值；并列值落在并列区间中点，
+    # 避免平坦历史被机械标成 0 分位。
+    below = int((hist < score).sum())
+    equal = int((hist == score).sum())
+    return float((below + equal * 0.5) / len(hist) * 100.0)
 
 
 def crowding_from_shares(share: pd.Series, as_of=None) -> dict:
@@ -87,9 +93,14 @@ def crowding_from_shares(share: pd.Series, as_of=None) -> dict:
         return empty
 
     s = share.copy()
-    s.index = pd.to_datetime(s.index)
-    s = pd.to_numeric(s, errors="coerce")
+    s.index = pd.to_datetime(s.index, errors="coerce")
+    s = pd.to_numeric(s, errors="coerce").replace(
+        [math.inf, -math.inf], pd.NA
+    )
+    s = s[s.index.notna()]
+    s = s.where(s.between(0, 1)).dropna()
     s = s.sort_index()
+    s = s[~s.index.duplicated(keep="last")]
     if len(s) > MAX_HISTORY_DAYS:
         s = s.iloc[-MAX_HISTORY_DAYS:]
 
@@ -101,7 +112,7 @@ def crowding_from_shares(share: pd.Series, as_of=None) -> dict:
 
     share_5d = rolling_mean(s, SHARE_SMOOTH_DAYS)
     last = s.iloc[-1]
-    today_share = float(last) if pd.notna(last) and math.isfinite(float(last)) else None
+    today_share = finite_float(last)
     today_5d = share_5d.iloc[-1]
     if pd.isna(today_5d):
         return {**empty, "share": today_share}
@@ -130,20 +141,26 @@ def crowding_from_shares(share: pd.Series, as_of=None) -> dict:
 
 def history_start_date(years: int = MAX_HISTORY_YEARS) -> str:
     days = years * 365 + 30
-    return (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    return recent_date(days)
 
 
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["trade_date", "amount", "change_pct"])
     out = df.copy()
-    out["trade_date"] = out["trade_date"].astype(str).str[:10]
+    if "trade_date" not in out.columns or "amount" not in out.columns:
+        return pd.DataFrame(columns=["trade_date", "amount", "change_pct"])
+    parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
     out["amount"] = pd.to_numeric(out["amount"], errors="coerce")
     if "change_pct" in out.columns:
         out["change_pct"] = pd.to_numeric(out["change_pct"], errors="coerce")
     else:
         out["change_pct"] = pd.NA
-    out = out.dropna(subset=["amount"])
+    out = out.replace([math.inf, -math.inf], pd.NA).dropna(subset=["amount"])
+    parsed_dates = parsed_dates.reindex(out.index)
+    valid = parsed_dates.notna() & (out["amount"] >= 0)
+    out = out.loc[valid].copy()
+    out["trade_date"] = parsed_dates.loc[valid].dt.strftime("%Y-%m-%d")
     out = out.drop_duplicates(subset=["trade_date"], keep="last")
     return out.sort_values("trade_date")
 
@@ -237,9 +254,13 @@ def fetch_board_frame(
     """
     em = fetch_board_frame_em(index_code, start_date)
     if not em.empty:
+        em.attrs["amount_source"] = "eastmoney_industry"
         return em
     if ths_code:
-        return fetch_board_frame_ths(ths_code, start_date)
+        fallback = fetch_board_frame_ths(ths_code, start_date)
+        if not fallback.empty:
+            fallback.attrs["amount_source"] = "ths_same_name_proxy"
+        return fallback
     return em
 
 
@@ -353,10 +374,21 @@ def list_industries() -> pd.DataFrame:
 def build_share_series(concept_amount: pd.Series, market_amount: pd.Series) -> pd.Series:
     c = pd.to_numeric(concept_amount, errors="coerce")
     m = pd.to_numeric(market_amount, errors="coerce")
-    c.index = c.index.astype(str).str[:10]
-    m.index = m.index.astype(str).str[:10]
+    c_dates = pd.to_datetime(c.index, errors="coerce")
+    m_dates = pd.to_datetime(m.index, errors="coerce")
+    c = c.loc[c_dates.notna()].copy()
+    m = m.loc[m_dates.notna()].copy()
+    c.index = c_dates[c_dates.notna()].strftime("%Y-%m-%d")
+    m.index = m_dates[m_dates.notna()].strftime("%Y-%m-%d")
+    c = c[~c.index.duplicated(keep="last")]
+    m = m[~m.index.duplicated(keep="last")]
     df = pd.concat([c.rename("c"), m.rename("m")], axis=1, join="inner")
-    df = df[(df["m"] > 0) & df["c"].notna()]
+    df = df.replace([math.inf, -math.inf], pd.NA).dropna(subset=["c", "m"])
+    df = df[
+        (df["m"] > 0)
+        & (df["c"] >= 0)
+        & (df["c"] <= df["m"])
+    ]
     return (df["c"] / df["m"]).rename("share")
 
 
@@ -395,6 +427,7 @@ def compute_board_crowding(
             "share_5d": None,
             "crowd_pct": None,
             "history_days": 0,
+            "amount_source": None,
         }
     board_amt = frame.set_index("trade_date")["amount"].sort_index()
     share = build_share_series(board_amt, market_amount)
@@ -408,10 +441,7 @@ def compute_board_crowding(
     change_pct = (
         aligned_rows.iloc[-1]["change_pct"] if not aligned_rows.empty else None
     )
-    try:
-        change_pct = float(change_pct) if pd.notna(change_pct) else None
-    except (TypeError, ValueError):
-        change_pct = None
+    change_pct = finite_float(change_pct)
     return {
         "index_code": index_code,
         "ths_code": ths_code,
@@ -419,6 +449,7 @@ def compute_board_crowding(
         "concept_name": board_name,
         "trade_date": trade_date,
         "change_pct": change_pct,
+        "amount_source": frame.attrs.get("amount_source"),
         **base,
     }
 
@@ -508,25 +539,25 @@ def _fetch_concept_top_stocks(index_code: str, top_n: int = 3) -> list:
                 name = str(row.get("short_name", "") or name_by_code.get(code, ""))
                 if "ST" in name.upper():
                     continue
-                try:
-                    amount = float(row.get("amount", 0) or 0)
-                except (TypeError, ValueError):
-                    amount = 0.0
-                try:
-                    price = float(row.get("price", 0) or 0)
-                except (TypeError, ValueError):
-                    price = 0.0
-                try:
-                    chg = row.get("change_pct")
-                    change_pct = None if pd.isna(chg) else float(chg)
-                except (TypeError, ValueError):
-                    change_pct = None
+                amount = finite_float(row.get("amount"))
+                amount = amount if amount is not None and amount > 0 else 0.0
+                price = finite_float(row.get("price"))
+                price = price if price is not None and price > 0 else 0.0
+                change_pct = finite_float(row.get("change_pct"))
+                quote_date = pd.to_datetime(
+                    row.get("trade_date"), errors="coerce"
+                )
                 valid = price > 0 or amount > 0
                 quote_map[code] = {
                     "code": code,
                     "name": name or name_by_code.get(code, code),
                     "amount": amount,
                     "change_pct": change_pct if valid else None,
+                    "as_of": (
+                        quote_date.strftime("%Y-%m-%d")
+                        if pd.notna(quote_date)
+                        else None
+                    ),
                     "valid": valid,
                 }
     except Exception:
@@ -535,15 +566,34 @@ def _fetch_concept_top_stocks(index_code: str, top_n: int = 3) -> list:
     rows = list(quote_map.values())
     valid_rows = [r for r in rows if r.get("valid")]
     if valid_rows:
+        dated_rows = [r for r in valid_rows if r.get("as_of")]
+        if dated_rows:
+            latest = max(r["as_of"] for r in dated_rows)
+            valid_rows = [r for r in dated_rows if r["as_of"] == latest]
         if any(r["amount"] > 0 for r in valid_rows):
-            valid_rows.sort(key=lambda x: (x["amount"], x["change_pct"] or -999), reverse=True)
+            valid_rows.sort(
+                key=lambda x: (
+                    x["amount"],
+                    x["change_pct"] if x["change_pct"] is not None else -999,
+                ),
+                reverse=True,
+            )
         else:
             valid_rows.sort(
-                key=lambda x: (x["change_pct"] is not None, x["change_pct"] or -999),
+                key=lambda x: (
+                    x["change_pct"] is not None,
+                    x["change_pct"] if x["change_pct"] is not None else -999,
+                ),
                 reverse=True,
             )
         return [
-            {"code": r["code"], "name": r["name"], "amount": r["amount"], "change_pct": r["change_pct"]}
+            {
+                "code": r["code"],
+                "name": r["name"],
+                "amount": r["amount"],
+                "change_pct": r["change_pct"],
+                "as_of": r["as_of"],
+            }
             for r in valid_rows[:top_n]
         ]
 
@@ -552,7 +602,15 @@ def _fetch_concept_top_stocks(index_code: str, top_n: int = 3) -> list:
         name = name_by_code.get(code, code)
         if "ST" in name.upper():
             continue
-        fallback.append({"code": code, "name": name, "amount": 0.0, "change_pct": None})
+        fallback.append(
+            {
+                "code": code,
+                "name": name,
+                "amount": None,
+                "change_pct": None,
+                "as_of": None,
+            }
+        )
         if len(fallback) >= top_n:
             break
     return fallback
@@ -660,8 +718,8 @@ def print_crowding_table(rows: list) -> None:
         print("无可用拥挤度结果")
         return
 
-    print(f"\n=== 行业交易拥挤度 Top{len(rows)}（东财行业 · 3年分位）===")
-    print("说明: 额占比 = 该行业指数成交额 / (上证+深证成交额)。")
+    print(f"\n=== 行业交易拥挤度 Top{len(rows)}（东财行业 · 最长3年分位）===")
+    print("说明: 额占比 = 该行业指数成交额 / (上证综指+深证综指成交额)。")
     print("      拥挤分位 = 近5日额占比 在近3年历史中的百分位（100%=近3年新高）。")
     print("      代表股 = 东财行业成分股中成交额最高的3只（无成交额时改按涨跌幅）。")
     print("      注: 东财历史K线不可用时，成交额序列用同名同花顺行业指数代理。\n")

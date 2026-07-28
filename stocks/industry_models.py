@@ -1,3 +1,6 @@
+from stocks.util import finite_float, fmt_chg
+
+
 class IndustryConcept:
     def __init__(self, concept_code, concept_name, change_pct, hot_value, hot_tag):
         self.concept_code = concept_code
@@ -14,17 +17,20 @@ class IndustryConcept:
             "\033[96m",
             "\033[0m",
         )
-        if self.change_pct > 0:
+        change_pct = finite_float(self.change_pct)
+        if change_pct is not None and change_pct > 0:
             color = red
-        elif self.change_pct < 0:
+        elif change_pct is not None and change_pct < 0:
             color = green
         else:
             color = white
+        hot_value = finite_float(self.hot_value)
+        hot_text = f"{hot_value:g}" if hot_value is not None else "-"
 
         return (
             f"{self.concept_name} (代码: {self.concept_code}) - "
-            f"涨跌幅: {color}{self.change_pct}%{reset}, "
-            f"热度值: {cyan}{self.hot_value}{reset}, "
+            f"涨跌幅: {color}{fmt_chg(change_pct)}{reset}, "
+            f"热度值: {cyan}{hot_text}{reset}, "
             f"热度标签: {self.hot_tag}"
         )
 
@@ -33,8 +39,8 @@ class IndustryConcept:
         return cls(
             concept_code=data.get("concept_code", ""),
             concept_name=data.get("concept_name", ""),
-            change_pct=float(data.get("change_pct", 0)),
-            hot_value=float(data.get("hot_value", 0)),
+            change_pct=finite_float(data.get("change_pct")),
+            hot_value=finite_float(data.get("hot_value")),
             hot_tag=data.get("hot_tag", ""),
         )
 

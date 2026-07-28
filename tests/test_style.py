@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import numpy as np
@@ -21,6 +22,24 @@ def _idx(values, start="2025-01-02"):
 
 
 class TestStyleFeatures(unittest.TestCase):
+    def test_nonfinite_close_is_excluded_from_aligned_window(self):
+        n = 40
+        base = _idx(np.linspace(1.0, 1.1, n))
+        bad = base.copy()
+        bad.iloc[-1] = float("inf")
+
+        feat = compute_style_features(
+            {
+                "hs300": base,
+                "zz1000": base,
+                "kc50": bad,
+                "dividend": base,
+            }
+        )
+
+        self.assertTrue(feat["ok"])
+        self.assertTrue(math.isfinite(feat["ret5_kc50"]))
+
     def test_compute_relative(self):
         n = 80
         hs = _idx(np.linspace(1.0, 1.05, n))
@@ -47,6 +66,14 @@ class TestStyleFeatures(unittest.TestCase):
 
 
 class TestClassifyStyle(unittest.TestCase):
+    def test_nonfinite_feature_is_treated_as_missing(self):
+        state, reasons = classify_style(
+            {"ok": True, "excess5_kc_hs": float("inf")}
+        )
+
+        self.assertEqual(state, STATE_BALANCED)
+        self.assertTrue(any("不足" in reason for reason in reasons))
+
     def test_tech_siphon(self):
         feat = {
             "ok": True,

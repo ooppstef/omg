@@ -1,9 +1,12 @@
-from datetime import datetime, timedelta
 import logging
+from datetime import date, datetime, timedelta
 from threading import RLock
 
 import adata
+import pandas as pd
+
 from stocks.stock_models import StockCurrentPrice
+from stocks.util import finite_float
 
 
 _INDEX_LOOKBACK_DAYS = 15
@@ -12,29 +15,50 @@ _cache_lock = RLock()
 
 
 def get_market_current_price(stock_codes):
+    if not stock_codes:
+        return []
     res_df = adata.stock.market.list_market_current(stock_codes)
-    return [
-        StockCurrentPrice(
-            row["stock_code"],
-            row["short_name"],
-            row["price"],
-            row["change_pct"],
-            row["amount"],
+    if res_df is None or res_df.empty:
+        return []
+    rows = []
+    for _, row in res_df.iterrows():
+        price = finite_float(row.get("price"))
+        if price is None or price <= 0:
+            continue
+        amount = finite_float(row.get("amount"))
+        trade_date = _parse_trade_date(row.get("trade_date"))
+        rows.append(
+            StockCurrentPrice(
+                row.get("stock_code"),
+                row.get("short_name"),
+                price,
+                finite_float(row.get("change_pct")),
+                amount if amount is not None and amount >= 0 else None,
+                trade_date.isoformat() if trade_date is not None else None,
+            )
         )
-        for _, row in res_df.iterrows()
-    ]
+    return rows
 
 
 def _parse_trade_date(trade_date):
+    try:
+        if pd.isna(trade_date):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(trade_date, date) and not isinstance(trade_date, datetime):
+        return trade_date
     if hasattr(trade_date, "date"):
-        return trade_date.date()
-    if isinstance(trade_date, str):
+        parsed = trade_date.date()
+        return parsed if isinstance(parsed, date) else None
+    if trade_date is not None:
+        text = str(trade_date).strip()
         for fmt in ("%Y-%m-%d", "%Y%m%d"):
             try:
-                return datetime.strptime(trade_date, fmt).date()
+                return datetime.strptime(text, fmt).date()
             except ValueError:
                 continue
-    return datetime.today().date()
+    return None
 
 
 def _remember_previous_close(index_code, trade_date_key, previous_close):
@@ -44,6 +68,8 @@ def _remember_previous_close(index_code, trade_date_key, previous_close):
 
 def _previous_close(index_code, trade_date):
     parsed_trade_date = _parse_trade_date(trade_date)
+    if parsed_trade_date is None:
+        return None
     trade_date_key = parsed_trade_date.strftime("%Y-%m-%d")
     cache_key = (index_code, trade_date_key)
     with _cache_lock:
@@ -51,7 +77,9 @@ def _previous_close(index_code, trade_date):
     if cached is not None:
         return cached
 
-    start_date = (parsed_trade_date - timedelta(days=_INDEX_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    start_date = (
+        parsed_trade_date - timedelta(days=_INDEX_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d")
     try:
         hist_df = adata.stock.market.ths_index.get_market_index(
             index_code=index_code, start_date=start_date
@@ -62,16 +90,24 @@ def _previous_close(index_code, trade_date):
 
     if hist_df is None or isinstance(hist_df, Exception) or hist_df.empty:
         return None
+    if not {"trade_date", "close"}.issubset(hist_df.columns):
+        return None
 
-    hist_df = hist_df.sort_values(by="trade_date")
-    prev_rows = hist_df[hist_df["trade_date"] < trade_date_key]
+    hist_df = hist_df.copy()
+    hist_df["_parsed_trade_date"] = pd.to_datetime(
+        hist_df["trade_date"], errors="coerce"
+    )
+    hist_df = hist_df.dropna(subset=["_parsed_trade_date"]).sort_values(
+        by="_parsed_trade_date"
+    )
+    target_date = pd.Timestamp(parsed_trade_date)
+    prev_rows = hist_df[hist_df["_parsed_trade_date"] < target_date]
     if prev_rows.empty:
         return None
     candidate_row = prev_rows.iloc[-1]
 
-    try:
-        previous_close = float(candidate_row["close"])
-    except (TypeError, ValueError):
+    previous_close = finite_float(candidate_row.get("close"))
+    if previous_close is None or previous_close <= 0:
         return None
 
     _remember_previous_close(index_code, trade_date_key, previous_close)
@@ -95,21 +131,26 @@ def get_index_current_price(index_code, index_name):
             return None
 
         row = res_df.iloc[0]
-        price = float(row["price"])
-        previous_close = _previous_close(index_code, row["trade_date"])
+        price = finite_float(row.get("price"))
+        if price is None or price <= 0:
+            return None
+        trade_date = _parse_trade_date(row.get("trade_date"))
+        previous_close = _previous_close(index_code, trade_date)
 
-        if previous_close and previous_close != 0:
+        if previous_close is not None and previous_close > 0:
             change_pct = ((price - previous_close) / previous_close) * 100
         else:
-            open_price = float(row["open"])
-            change_pct = ((price - open_price) / open_price) * 100 if open_price else 0.0
+            # 开盘到当前的涨跌并不是日涨跌；历史昨收缺失时宁可显式留空。
+            change_pct = finite_float(row.get("change_pct"))
 
+        amount = finite_float(row.get("amount"))
         return StockCurrentPrice(
             index_code,
             index_name,
             price,
-            round(change_pct, 2),
-            row["amount"],
+            round(change_pct, 2) if change_pct is not None else None,
+            amount if amount is not None and amount >= 0 else None,
+            trade_date.isoformat() if trade_date is not None else None,
         )
     except Exception as e:
         print(f"获取指数 {index_code} 失败: {e}")

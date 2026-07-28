@@ -8,8 +8,10 @@ import pandas as pd
 from stocks.etf import (
     CHANGE_SOURCE_EM_SPOT,
     STATE_DOWN,
+    STATE_START,
     STATES,
     _scale_em_price,
+    _normalize_etf_frame,
     build_comment,
     build_reason_block,
     classify_etf,
@@ -38,6 +40,34 @@ class TestUniverse(unittest.TestCase):
 
 
 class TestFeaturesAndState(unittest.TestCase):
+    def test_normalize_etf_frame_drops_invalid_latest_price_and_date(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-20",
+                    "close": 1.0,
+                    "amount": 100.0,
+                    "change_pct": 1.0,
+                },
+                {
+                    "trade_date": "2026-07-21",
+                    "close": float("inf"),
+                    "amount": 100.0,
+                    "change_pct": 2.0,
+                },
+                {
+                    "trade_date": "not-a-date",
+                    "close": 1.1,
+                    "amount": 100.0,
+                    "change_pct": 3.0,
+                },
+            ]
+        )
+
+        out = _normalize_etf_frame(raw, "2026-01-01")
+
+        self.assertEqual(out["trade_date"].tolist(), ["2026-07-20"])
+
     def test_compute_features_basic(self):
         n = 120
         close = _series(np.linspace(1.0, 1.5, n))
@@ -202,7 +232,7 @@ class TestFeaturesAndState(unittest.TestCase):
         self.assertAlmostEqual(float(out.iloc[-1]["change_pct"]), 1.2)
 
     def test_ensure_keeps_patched_close_when_amount_missing(self):
-        """amount 缺失时不得让特征对齐丢掉补齐日收盘价。"""
+        """amount 缺失时保留补齐价，但不得伪造量比。"""
         n = 80
         idx = pd.bdate_range("2026-03-01", periods=n)
         hist = pd.DataFrame(
@@ -224,13 +254,100 @@ class TestFeaturesAndState(unittest.TestCase):
         with patch("stocks.etf.fetch_etf_spot_em", return_value=spot):
             out, meta = ensure_etf_as_of(hist, "512690", "2026-07-21")
         self.assertTrue(meta["patched"])
-        self.assertGreater(float(out.iloc[-1]["amount"]), 0)
+        self.assertTrue(pd.isna(out.iloc[-1]["amount"]))
         close = out.set_index("trade_date")["close"]
         amount = out.set_index("trade_date")["amount"]
         bench = close * 0.99
         feat = compute_features(close, amount, bench)
         self.assertTrue(feat["ok"])
         self.assertAlmostEqual(float(feat["close"]), 0.425, places=4)
+        self.assertIsNone(feat["vol_ratio"])
+        self.assertFalse(feat["volume_available"])
+
+    def test_missing_latest_amount_cannot_trigger_volume_start(self):
+        n = 80
+        close = _series([1.0] * (n - 15) + list(np.linspace(1.0, 1.12, 15)))
+        amount = _series([1e9] * n)
+        amount.iloc[-1] = np.nan
+        bench = _series([1.0] * n)
+
+        feat = compute_features(close, amount, bench)
+        state, reasons = classify_horizon(feat, "short")
+
+        self.assertTrue(feat["ok"])
+        self.assertIsNone(feat["vol_ratio"])
+        self.assertNotEqual(state, STATE_START)
+        self.assertFalse(any("启动" in reason and "放量" in reason for reason in reasons))
+
+    def test_missing_latest_benchmark_keeps_price_but_not_excess_signal(self):
+        n = 80
+        close = _series([1.0] * (n - 15) + list(np.linspace(1.0, 1.12, 15)))
+        amount = _series([1e9] * (n - 8) + [2e9] * 8)
+        bench = _series([1.0] * n)
+        bench.iloc[-1] = np.nan
+
+        feat = compute_features(close, amount, bench)
+        state, reasons = classify_horizon(feat, "short")
+
+        self.assertTrue(feat["ok"])
+        self.assertAlmostEqual(feat["close"], 1.12)
+        self.assertIsNone(feat["excess_10"])
+        self.assertNotEqual(state, STATE_START)
+        self.assertFalse(any("超额转正" in reason for reason in reasons))
+
+    def test_partial_session_spot_does_not_compare_partial_volume_to_full_days(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-20",
+                    "close": 0.432,
+                    "amount": 1e9,
+                    "change_pct": 1.2,
+                }
+            ]
+        )
+        spot = {
+            "code": "512690",
+            "name": "酒ETF",
+            "close": 0.425,
+            "change_pct": -1.62,
+            "amount": 8e8,
+            "trade_date": "2026-07-21",
+        }
+
+        with (
+            patch("stocks.etf.fetch_etf_spot_em", return_value=spot),
+            patch("stocks.etf._is_partial_spot_day", return_value=True),
+        ):
+            out, meta = ensure_etf_as_of(frame, "512690", "2026-07-21")
+
+        self.assertTrue(pd.isna(out.iloc[-1]["amount"]))
+        self.assertEqual(meta["volume_status"], "partial_session")
+
+    def test_existing_intraday_bar_also_disables_partial_volume(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-07-20",
+                    "close": 0.432,
+                    "amount": 1e9,
+                    "change_pct": 1.2,
+                },
+                {
+                    "trade_date": "2026-07-21",
+                    "close": 0.425,
+                    "amount": 8e8,
+                    "change_pct": -1.62,
+                },
+            ]
+        )
+
+        with patch("stocks.etf._is_partial_spot_day", return_value=True):
+            out, meta = ensure_etf_as_of(frame, "512690", "2026-07-21")
+
+        self.assertFalse(meta["patched"])
+        self.assertTrue(pd.isna(out.iloc[-1]["amount"]))
+        self.assertEqual(meta["volume_status"], "partial_session")
 
     def test_ensure_refuses_bad_spot(self):
         frame = pd.DataFrame(

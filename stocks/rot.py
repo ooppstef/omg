@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 from stocks.universe import A_SHARE_CODE_PREFIXES
-from stocks.util import env_int, recent_date
+from stocks.util import env_int, finite_float, recent_date
 
 # 常量配置
 WARM_THRESH = 50
@@ -13,6 +13,7 @@ STRONG_MIN = 1.5
 LOOKBACK = 8
 RECENT_DAYS = 2
 WARM_DAYS = 3
+CONSTITUENT_COVERAGE_GATE = 0.80
 
 CONCEPT_WORKERS = env_int("OMG_ROT_CONCEPT_WORKERS", 20)
 STOCK_WORKERS = env_int("OMG_ROT_STOCK_WORKERS", 20)
@@ -22,26 +23,78 @@ get_recent_date = recent_date
 
 def _amount_mult(amount_series):
     """成交额放大因子，用 log 压缩避免大额主导。"""
-    amounts = pd.to_numeric(amount_series, errors="coerce").fillna(0.0)
-    median = amounts.median()
-    if pd.isna(median) or median <= 0:
-        median = 1.0
-    return amounts.apply(lambda a: 1.0 + math.log1p(max(a, 0.0) / median))
+    amounts = pd.to_numeric(amount_series, errors="coerce").replace(
+        [math.inf, -math.inf], pd.NA
+    )
+    valid = amounts[amounts > 0]
+    median = finite_float(valid.median())
+    if median is None or median <= 0:
+        return pd.Series(float("nan"), index=amounts.index)
+    return amounts.apply(
+        lambda amount: (
+            1.0 + math.log1p(float(amount) / median)
+            if finite_float(amount) is not None and float(amount) > 0
+            else float("nan")
+        )
+    )
+
+
+def _clean_strength_frame(strength_df):
+    required = ("trade_date", "amount", "daily_strength")
+    if (
+        strength_df is None
+        or strength_df.empty
+        or not set(required).issubset(strength_df.columns)
+    ):
+        return pd.DataFrame(columns=list(required))
+    out = strength_df.copy()
+    parsed_dates = pd.to_datetime(
+        out["trade_date"], errors="coerce", format="mixed"
+    )
+    for column in ("amount", "daily_strength"):
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out = out.replace([math.inf, -math.inf], pd.NA).dropna(
+        subset=["amount", "daily_strength"]
+    )
+    parsed_dates = parsed_dates.reindex(out.index)
+    out = out.loc[parsed_dates.notna()].copy()
+    out["trade_date"] = parsed_dates.loc[
+        parsed_dates.notna()
+    ].dt.strftime("%Y-%m-%d")
+    return out.loc[out["amount"] > 0]
 
 
 def daily_strength(concept_df, benchmark):
     """构建概念板块的日强度序列。"""
     cols = ["trade_date", "change_pct", "amount", "excess_return", "daily_strength"]
-    if concept_df is None or concept_df.empty:
+    required = {"trade_date", "change_pct", "amount"}
+    if (
+        concept_df is None
+        or concept_df.empty
+        or not required.issubset(concept_df.columns)
+    ):
         return pd.DataFrame(columns=cols)
 
     df = concept_df.copy()
-    df["trade_date"] = df["trade_date"].astype(str).str[:10]
-    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce").fillna(0.0)
-    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
+    parsed_dates = pd.to_datetime(
+        df["trade_date"], errors="coerce", format="mixed"
+    )
+    df = df.loc[parsed_dates.notna()].copy()
+    df["trade_date"] = parsed_dates.loc[
+        parsed_dates.notna()
+    ].dt.strftime("%Y-%m-%d")
+    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce")
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
 
     df["benchmark_change_pct"] = df["trade_date"].map(benchmark)
-    df = df.dropna(subset=["benchmark_change_pct"]).copy()
+    df["benchmark_change_pct"] = pd.to_numeric(
+        df["benchmark_change_pct"], errors="coerce"
+    )
+    df = df.replace([math.inf, -math.inf], pd.NA)
+    df = df.dropna(
+        subset=["change_pct", "amount", "benchmark_change_pct"]
+    ).copy()
+    df = df[df["amount"] > 0].copy()
     if df.empty:
         return pd.DataFrame(columns=cols)
     df["excess_return"] = df["change_pct"] - df["benchmark_change_pct"]
@@ -54,28 +107,28 @@ def _clamp(value, lower=0.0, upper=100.0):
 
 
 def _stock_score(feat):
+    if feat.get("breadth_available") is False:
+        return 0.0
     avg = float(feat.get("top5_avg_change_pct", 0.0) or 0.0)
     pos = float(feat.get("positive_ratio", 0.0) or 0.0)
-    conc = float(feat.get("leader_concentration", 0.0) or 0.0)
     return _clamp(
         _clamp((avg + 2.0) / 5.0 * 40.0, upper=40.0)
-        + _clamp(pos * 30.0, upper=30.0)
-        + _clamp(conc * 30.0, upper=30.0)
+        + _clamp(pos * 60.0, upper=60.0)
     )
 
 
 def _heat_score(hot_row):
     if not hot_row:
         return 0.0
-    rank = hot_row.get("rank")
-    hot_val = hot_row.get("hot_value")
+    rank = finite_float(hot_row.get("rank"))
+    hot_val = finite_float(hot_row.get("hot_value"))
     rs = 0.0
     hs = 0.0
-    if rank is not None and not pd.isna(rank):
-        rank = max(float(rank), 1.0)
+    if rank is not None:
+        rank = max(rank, 1.0)
         rs = _clamp((21.0 - rank) / 20.0 * 50.0, upper=50.0)
-    if hot_val is not None and not pd.isna(hot_val):
-        hs = _clamp(float(hot_val) / 100.0 * 50.0, upper=50.0)
+    if hot_val is not None:
+        hs = _clamp(hot_val / 100.0 * 50.0, upper=50.0)
     return _clamp(rs + hs)
 
 
@@ -121,7 +174,8 @@ def _match_hot_row(target, hot_by_code, hot_by_name):
 
 def _pullback_volume_score(strength_df):
     """回流量能加分：偏好缩量企稳，惩罚弱势放量。"""
-    if strength_df is None or strength_df.empty:
+    clean = _clean_strength_frame(strength_df)
+    if clean.empty:
         return {
             "score": 0.0,
             "recent_amount_ratio": 1.0,
@@ -132,15 +186,15 @@ def _pullback_volume_score(strength_df):
             "weak_expansion": False,
         }
 
-    tail = strength_df.sort_values("trade_date").tail(LOOKBACK).copy()
+    tail = clean.sort_values("trade_date").tail(LOOKBACK).copy()
     recent = tail.tail(RECENT_DAYS)
     prior = tail.iloc[:-RECENT_DAYS] if len(tail) > RECENT_DAYS else tail
 
-    amounts = pd.to_numeric(tail["amount"], errors="coerce").fillna(0.0)
-    recent_amounts = pd.to_numeric(recent["amount"], errors="coerce").fillna(0.0)
-    prior_amounts = pd.to_numeric(prior["amount"], errors="coerce").fillna(0.0)
-    strengths = pd.to_numeric(tail["daily_strength"], errors="coerce").fillna(0.0)
-    recent_strengths = pd.to_numeric(recent["daily_strength"], errors="coerce").fillna(0.0)
+    amounts = tail["amount"]
+    recent_amounts = recent["amount"]
+    prior_amounts = prior["amount"]
+    strengths = tail["daily_strength"]
+    recent_strengths = recent["daily_strength"]
 
     prior_median = float(prior_amounts.median()) if not prior_amounts.empty else float(amounts.median())
     if prior_median <= 0:
@@ -177,7 +231,8 @@ def _pullback_volume_score(strength_df):
 
 def _warming_volume_score(strength_df):
     """升温量能加分：偏好强度抬升时量能同步扩张。"""
-    if strength_df is None or strength_df.empty:
+    clean = _clean_strength_frame(strength_df)
+    if clean.empty:
         return {
             "score": 0.0,
             "latest_vs_median": 1.0,
@@ -187,9 +242,9 @@ def _warming_volume_score(strength_df):
             "contracting": False,
         }
 
-    tail = strength_df.sort_values("trade_date").tail(WARM_DAYS).copy()
-    amounts = pd.to_numeric(tail["amount"], errors="coerce").fillna(0.0)
-    strengths = pd.to_numeric(tail["daily_strength"], errors="coerce").fillna(0.0)
+    tail = clean.sort_values("trade_date").tail(WARM_DAYS).copy()
+    amounts = tail["amount"]
+    strengths = tail["daily_strength"]
 
     if amounts.empty:
         return {
@@ -228,23 +283,74 @@ def _warming_volume_score(strength_df):
     }
 
 
-def stock_confirm(stock_df):
-    """用成分股 top5 强弱确认板块承接力。"""
-    empty = {"top5_avg_change_pct": 0.0, "positive_ratio": 0.0, "leader_concentration": 0.0}
-    if stock_df is None or stock_df.empty:
+def stock_confirm(stock_df, expected_count=None):
+    """用领涨强度与全部有效成分股的上涨宽度确认板块承接力。"""
+    empty = {
+        "top5_avg_change_pct": 0.0,
+        "positive_ratio": 0.0,
+        "leader_concentration": 0.0,
+        "constituent_count": 0,
+        "positive_count": 0,
+        "expected_constituent_count": int(expected_count or 0),
+        "coverage_ratio": 0.0,
+        "breadth_available": False,
+        "as_of": None,
+        "date_status": "unavailable",
+    }
+    if (
+        stock_df is None
+        or stock_df.empty
+        or "change_pct" not in stock_df.columns
+    ):
         return empty
 
     df = stock_df.copy()
-    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce").fillna(0.0)
+    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce")
+    df = df.replace([math.inf, -math.inf], pd.NA).dropna(subset=["change_pct"])
+    has_date_column = "as_of" in df.columns
+    quote_as_of = None
+    if has_date_column:
+        quote_dates = pd.to_datetime(df["as_of"], errors="coerce")
+        if quote_dates.notna().any():
+            quote_as_of = quote_dates.max().strftime("%Y-%m-%d")
+            df = df.loc[
+                quote_dates.dt.strftime("%Y-%m-%d") == quote_as_of
+            ].copy()
+    if "code" in df.columns:
+        df = df.drop_duplicates(subset=["code"], keep="last")
+    if df.empty:
+        return empty
+
+    expected = int(expected_count) if expected_count is not None else len(df)
+    expected = max(expected, len(df))
+    coverage_ratio = len(df) / expected if expected > 0 else 0.0
+    date_available = quote_as_of is not None or not has_date_column
+    breadth_available = (
+        coverage_ratio >= CONSTITUENT_COVERAGE_GATE and date_available
+    )
+
     df = df.sort_values("change_pct", ascending=False)
     top5 = df.head(5)
-    positive = top5[top5["change_pct"] > 0]["change_pct"]
+    positive = df[df["change_pct"] > 0]["change_pct"]
 
     pos_sum = float(positive.sum())
     return {
         "top5_avg_change_pct": round(float(top5["change_pct"].mean()), 2),
-        "positive_ratio": round(float((top5["change_pct"] > 0).mean()), 2),
+        "positive_ratio": round(float((df["change_pct"] > 0).mean()), 2),
         "leader_concentration": round(float(positive.head(2).sum() / pos_sum), 2) if pos_sum > 0 else 0.0,
+        "constituent_count": int(len(df)),
+        "positive_count": int((df["change_pct"] > 0).sum()),
+        "expected_constituent_count": expected,
+        "coverage_ratio": round(coverage_ratio, 3),
+        "breadth_available": breadth_available,
+        "as_of": quote_as_of,
+        "date_status": (
+            "aligned_latest"
+            if quote_as_of is not None
+            else "not_supplied"
+            if not has_date_column
+            else "provider_trade_date_unavailable"
+        ),
     }
 
 
@@ -253,8 +359,12 @@ def pullback_score(strength_df, hot_row, feat):
     if strength_df is None or strength_df.empty:
         return {"score": 0.0, "gate_passed": False, "was_strong": False}
 
-    tail = strength_df.sort_values("trade_date").tail(LOOKBACK).copy()
-    s = pd.to_numeric(tail["daily_strength"], errors="coerce").fillna(0.0)
+    tail = _clean_strength_frame(strength_df).sort_values(
+        "trade_date"
+    ).tail(LOOKBACK)
+    if tail.empty:
+        return {"score": 0.0, "gate_passed": False, "was_strong": False}
+    s = tail["daily_strength"]
     prior = s.iloc[:-RECENT_DAYS] if len(s) > RECENT_DAYS else s
     recent = s.tail(RECENT_DAYS)
 
@@ -296,9 +406,13 @@ def warming_score(strength_df, hot_row, feat):
     if strength_df is None or strength_df.empty:
         return {"score": 0.0}
 
-    tail = strength_df.sort_values("trade_date").tail(WARM_DAYS).copy()
-    s = pd.to_numeric(tail["daily_strength"], errors="coerce").fillna(0.0)
-    amt = pd.to_numeric(tail["amount"], errors="coerce").fillna(0.0)
+    tail = _clean_strength_frame(strength_df).sort_values(
+        "trade_date"
+    ).tail(WARM_DAYS)
+    if tail.empty:
+        return {"score": 0.0}
+    s = tail["daily_strength"]
+    amt = tail["amount"]
 
     slope = float(s.iloc[-1] - s.iloc[0]) if len(s) >= 2 else 0.0
     diffs = s.diff().dropna()
@@ -345,8 +459,19 @@ def _get_benchmark(start_date, lookback_days=None):
     if df is None or df.empty:
         return {}
     df = df.copy()
-    df["trade_date"] = df["trade_date"].astype(str).str[:10]
-    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce").fillna(0.0)
+    if not {"trade_date", "change_pct"}.issubset(df.columns):
+        return {}
+    parsed_dates = pd.to_datetime(
+        df["trade_date"], errors="coerce", format="mixed"
+    )
+    df = df.loc[parsed_dates.notna()].copy()
+    df["trade_date"] = parsed_dates.loc[
+        parsed_dates.notna()
+    ].dt.strftime("%Y-%m-%d")
+    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce")
+    df = df.replace([math.inf, -math.inf], pd.NA).dropna(
+        subset=["change_pct"]
+    )
     df = df.sort_values("trade_date")
     if lookback_days:
         df = df.tail(lookback_days)
@@ -378,7 +503,16 @@ def _fetch_concepts(all_concepts, start_date):
         if df is None or df.empty:
             return None
         df = df.copy()
-        df["trade_date"] = df["trade_date"].astype(str).str[:10]
+        if "trade_date" not in df.columns:
+            return None
+        parsed_dates = pd.to_datetime(
+            df["trade_date"], errors="coerce", format="mixed"
+        )
+        df = df.loc[parsed_dates.notna()].copy()
+        df["trade_date"] = parsed_dates.loc[
+            parsed_dates.notna()
+        ].dt.strftime("%Y-%m-%d")
+        df = df.drop_duplicates(subset=["trade_date"], keep="last")
         df = df[df["trade_date"] >= start_date].sort_values("trade_date")
         if len(df) < 3:
             return None
@@ -410,13 +544,23 @@ def _get_stock_perf(stock_codes):
             return []
         results = []
         for _, row in df.iterrows():
-            chg = row["change_pct"]
-            price = row["price"]
+            chg = finite_float(row.get("change_pct"))
+            price = finite_float(row.get("price"))
+            if chg is None or price is None or price <= 0:
+                continue
+            trade_date = pd.to_datetime(
+                str(row.get("trade_date")), errors="coerce"
+            )
             results.append({
                 "code": row["stock_code"],
                 "name": row["short_name"],
-                "change_pct": 0.0 if pd.isna(chg) else float(chg),
-                "price": 0.0 if pd.isna(price) else float(price),
+                "change_pct": chg,
+                "price": price,
+                "as_of": (
+                    trade_date.strftime("%Y-%m-%d")
+                    if pd.notna(trade_date)
+                    else None
+                ),
             })
         return results
     except Exception as e:
@@ -435,11 +579,16 @@ def _fetch_stocks(code, top_n):
         return stock_confirm(pd.DataFrame()), []
 
     # 只保留沪深主板/创业板/科创板，排除ST
-    codes = [
-        code
-        for code in df["stock_code"].tolist()
-        if str(code).startswith(A_SHARE_CODE_PREFIXES)
-    ]
+    codes = []
+    for _, row in df.iterrows():
+        stock_code = str(row.get("stock_code", "")).strip()
+        stock_name = str(row.get("short_name", "") or "")
+        if not stock_code.startswith(A_SHARE_CODE_PREFIXES):
+            continue
+        if "ST" in stock_name.upper():
+            continue
+        codes.append(stock_code)
+    codes = list(dict.fromkeys(codes))
 
     all_perfs = _get_stock_perf(codes)
     perfs = [
@@ -447,7 +596,11 @@ def _fetch_stocks(code, top_n):
         for perf in all_perfs
         if "ST" not in str(perf.get("name", "")).upper()
     ]
-    feat = stock_confirm(pd.DataFrame(perfs))
+    feat = stock_confirm(pd.DataFrame(perfs), expected_count=len(codes))
+    if feat.get("as_of"):
+        perfs = [
+            perf for perf in perfs if perf.get("as_of") == feat["as_of"]
+        ]
     perfs.sort(key=lambda x: x.get("change_pct", 0.0), reverse=True)
     return feat, perfs[:top_n]
 
@@ -508,6 +661,7 @@ def _reason(group, pull_res, warm_res, feat, hot_row):
     hot_rank = hot_row.get("rank") if hot_row else None
     pos = float(feat.get("positive_ratio", 0.0) or 0.0)
     top5_avg = float(feat.get("top5_avg_change_pct", 0.0) or 0.0)
+    breadth_available = bool(feat.get("breadth_available"))
 
     if group == "回流优先":
         if pull_res.get("reengage"):
@@ -524,22 +678,26 @@ def _reason(group, pull_res, warm_res, feat, hot_row):
             parts.append("末日承接回升")
         elif hot_rank:
             parts.append(f"热榜第{int(hot_rank)}")
-        if pos >= 0.8:
-            parts.append(f"Top5全强，均涨{_fmt_signed(top5_avg)}%")
+        if not breadth_available:
+            parts.append("成分覆盖不足")
+        elif pos >= 0.8:
+            parts.append(f"成分翻红{pos * 100:.0f}%，领涨均值{_fmt_signed(top5_avg)}%")
         elif pos >= 0.4:
-            parts.append(f"Top5有{int(round(pos * 5))}只翻红")
+            parts.append(f"成分翻红{pos * 100:.0f}%")
     elif group == "升温接力":
         if warm_res.get("expanding"):
             lead = "近3日升温，量能配合"
         else:
-            lead = "近3日升温，扩散改善"
+            lead = "近3日升温，量能未明显扩张"
 
         parts.append(f"强度抬升{_fmt_signed(warm_res.get('slope', 0.0))}")
         parts.append(f"末日量能比{_fmt_ratio(max(warm_res.get('latest_vs_median', 1.0), warm_res.get('latest_vs_first', 1.0)))}")
-        if pos >= 0.6:
-            parts.append(f"Top5有{int(round(pos * 5))}只翻红")
+        if not breadth_available:
+            parts.append("成分覆盖不足")
+        elif pos >= 0.6:
+            parts.append(f"成分翻红{pos * 100:.0f}%")
         elif top5_avg:
-            parts.append(f"Top5均涨{_fmt_signed(top5_avg)}%")
+            parts.append(f"领涨Top5均值{_fmt_signed(top5_avg)}%")
         if hot_rank:
             parts.append(f"热榜第{int(hot_rank)}")
     else:
@@ -557,12 +715,14 @@ def _reason(group, pull_res, warm_res, feat, hot_row):
         parts.append(f"量能比{_fmt_ratio(pull_res.get('recent_amount_ratio', 1.0))}")
         if hot_rank:
             parts.append(f"热榜第{int(hot_rank)}")
-        if pos >= 0.6:
-            parts.append(f"Top5有{int(round(pos * 5))}只翻红")
+        if not breadth_available:
+            parts.append("成分覆盖不足")
+        elif pos >= 0.6:
+            parts.append(f"成分翻红{pos * 100:.0f}%")
         elif top5_avg:
-            parts.append(f"Top5均涨{_fmt_signed(top5_avg)}%")
+            parts.append(f"领涨Top5均值{_fmt_signed(top5_avg)}%")
 
-    return f"{lead}；" + "，".join(parts[:3])
+    return f"{lead}；" + "，".join(parts[:4])
 
 
 def print_report(result, top_n=5):
@@ -689,9 +849,11 @@ def analyze(days: int = 5, top_concepts: int = 10, top_stocks: int = 5):
 
         results[group].append({
             "name": p["name"], "index_code": p["code"], "score": score,
+            "as_of": str(p["sdf"].iloc[-1]["trade_date"])[:10],
             "reason": _reason(group, pr, wr, feat, p["hot_row"]),
             "pullback_score": pr["score"], "warming_score": wr["score"],
             "hot_rank": p["hot_row"].get("rank") if p["hot_row"] else None,
+            "stock_confirmation": feat,
             "top_stocks": tops,
         })
 

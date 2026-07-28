@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import datetime
 import io
 import json
 import math
 import threading
+import time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from stocks.ai import search as ai_search
 from stocks.util import env_int
 
 _STDOUT_LOCK = threading.Lock()
+_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _jsonable(obj: Any) -> Any:
@@ -52,6 +56,7 @@ def _jsonable(obj: Any) -> Any:
             "price": _jsonable(obj.price),
             "change_percent": _jsonable(obj.change_percent),
             "amount": _jsonable(getattr(obj, "amount", None)),
+            "as_of": _jsonable(getattr(obj, "as_of", None)),
         }
     try:
         import pandas as pd
@@ -158,6 +163,7 @@ def _tool_style(args: dict) -> dict:
     feat = dict(result.get("features") or {})
     feat.pop("frame", None)
     payload = {
+        "as_of": result.get("as_of"),
         "state": result.get("state"),
         "reasons": result.get("reasons"),
         "trend": result.get("trend"),
@@ -251,8 +257,18 @@ def _tool_list(_args: dict) -> dict:
     if not index_rows and not watch_rows:
         detail = "；".join(errors)
         return _err(f"主要指数与自选行情均获取失败{f'：{detail}' if detail else ''}")
+    source_dates = sorted(
+        {
+            str(value)[:10]
+            for row in [*index_rows, *(watch_rows or [])]
+            if (value := getattr(row, "as_of", None)) is not None
+        }
+    )
     return _ok(
         {
+            "as_of": source_dates[0] if len(source_dates) == 1 else None,
+            "as_of_dates": source_dates,
+            "observed_at": datetime.datetime.now(_TZ).isoformat(timespec="seconds"),
             "indexes": index_rows,
             "watchlist": watch_rows or [],
             "errors": errors,
@@ -308,11 +324,13 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "web_search": _tool_web_search,
 }
 
-# 同进程同交易日缓存只读行情 tools，避免日复盘重复拉数
+# 短时缓存只读行情 tools，避免同一轮复盘重复拉数；不能按整日缓存，
+# 否则早盘快照会一直冒充收盘数据。
 _CACHEABLE_TOOLS = frozenset(
     {"mood", "style", "rot", "crowd", "etf", "hot"}
 )
-_TOOL_CACHE: dict[tuple[str, str], dict] = {}
+_DEFAULT_CACHE_TTL_SECONDS = 300
+_TOOL_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _TOOL_CACHE_DAY: str | None = None
 _TOOL_CACHE_LOCK = threading.Lock()
 
@@ -354,14 +372,29 @@ def call(name: str, args: dict | None = None) -> dict:
 
         today = recent_date(0)
         key = _cache_key(name, args)
+        lookup_time = time.monotonic()
+        ttl_seconds = env_int(
+            "OMG_TOOL_CACHE_TTL_SECONDS",
+            _DEFAULT_CACHE_TTL_SECONDS,
+        )
+        cache_hit = False
+        cached_payload = None
         with _TOOL_CACHE_LOCK:
             global _TOOL_CACHE_DAY
             if _TOOL_CACHE_DAY != today:
                 _TOOL_CACHE.clear()
                 _TOOL_CACHE_DAY = today
             cached = _TOOL_CACHE.get(key)
-        if cached is not None:
-            return cached
+            if cached is not None:
+                stored_at, payload = cached
+                if lookup_time - stored_at <= ttl_seconds:
+                    cache_hit = True
+                    cached_payload = copy.deepcopy(payload)
+                else:
+                    # 在同一临界区淘汰，避免并发请求刚写入的新值被误删。
+                    _TOOL_CACHE.pop(key, None)
+        if cache_hit:
+            return cached_payload
 
     try:
         result = handler(args or {})
@@ -378,7 +411,7 @@ def call(name: str, args: dict | None = None) -> dict:
                 _TOOL_CACHE_DAY = now
             # 慢 handler 跨日：丢弃写入，避免把旧日结果冻进新日桶
             if now == today:
-                _TOOL_CACHE[key] = copy.deepcopy(result)
+                _TOOL_CACHE[key] = (time.monotonic(), copy.deepcopy(result))
     return result
 
 
@@ -388,7 +421,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "mood",
-                "description": "市场情绪阶段（涨停四池：冰点/修复/主升/分歧/退潮等）",
+                "description": "涨停四池的描述性启发式情绪标签（非预测概率）",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -406,7 +439,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "style",
-                "description": "风格结构（大小盘/科技/红利相对强弱）",
+                "description": "大小盘/科技/红利相对收益的启发式风格标签（非预测）",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -424,7 +457,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "rot",
-                "description": "热点板块轮动（回流优先/升温接力/放弃观察）",
+                "description": "基于超额、量能与成分宽度的启发式轮动分组（非预测）",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -454,7 +487,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "crowd",
-                "description": "东财行业交易拥挤度（近3年成交额占比分位）",
+                "description": "行业交易份额的近3年历史分位；只作拥挤风险上下文，不是反转概率",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -472,7 +505,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "etf",
-                "description": "主题 ETF 短线/中线状态与点评",
+                "description": "主题 ETF 价量特征的启发式短/中线状态（非收益预测）",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -480,7 +513,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "hot",
-                "description": "概念板块强度 Top（超额收益×成交额加权）",
+                "description": "概念板块启发式强度 Top（超额收益×成交额权重）",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -504,7 +537,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "list",
-                "description": "主要指数与自选股实时快照",
+                "description": "主要指数与自选股快照；区分各行情数据日期与请求观察时间",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -512,7 +545,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "rank",
-                "description": "个股涨幅 Top / 跌幅 Top（含行业与热点概念标签、成交额；便于量价归类）",
+                "description": "个股涨跌两端观察截面（源接口无交易日期；含标签和绝对成交额，不能据此判断放量/缩量或全市场宽度）",
                 "parameters": {
                     "type": "object",
                     "properties": {

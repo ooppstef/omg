@@ -6,12 +6,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from functools import wraps
 from threading import RLock, local
+from zoneinfo import ZoneInfo
 
 import adata
 import pandas as pd
 from stocks.db import dir_path
 from stocks.paths import data_file, exclusive_file_lock
 from stocks.universe import A_SHARE_CODE_PREFIXES
+from stocks.util import recent_date
 
 # ---------- 配置 ----------
 INIT_DAYS = 200  # 初始化拉取交易日数（约10个月）
@@ -20,6 +22,27 @@ WORKERS = 20  # 并发线程数
 COVERAGE_GATE = 0.90  # 增量更新覆盖率门槛
 INIT_COVERAGE_GATE = 0.80  # 全量初始化覆盖率门槛（宽松）
 PREFIXES = A_SHARE_CODE_PREFIXES
+_TZ = ZoneInfo("Asia/Shanghai")
+_QUOTE_COLUMNS = (
+    "code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "change_pct",
+    "turnover",
+)
+_NUMERIC_QUOTE_COLUMNS = _QUOTE_COLUMNS[2:]
+_REQUIRED_QUOTE_NUMERIC = ("open", "high", "low", "close", "volume")
+_VALID_QUOTE_SQL = (
+    "open > 0 AND high > 0 AND low > 0 AND close > 0 "
+    "AND volume > 0 AND change_pct IS NOT NULL "
+    "AND high >= open AND high >= close AND high >= low "
+    "AND low <= open AND low <= close AND low <= high"
+)
 
 DDL = """
 CREATE TABLE IF NOT EXISTS DailyQuote (
@@ -140,8 +163,7 @@ def _all_codes():
 
 
 def _start_date(days):
-    dt = datetime.date.today() - datetime.timedelta(days=int(days * 1.8))
-    return dt.strftime("%Y-%m-%d")
+    return recent_date(int(days * 1.8))
 
 
 def _cutoff_date():
@@ -151,28 +173,73 @@ def _cutoff_date():
 # ---------- 拉取 ----------
 
 
+def _sanitize_quote_frame(frame):
+    """剔除无法用于 OHLCV/技术指标计算的行情行。"""
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=_QUOTE_COLUMNS)
+    if not set(_QUOTE_COLUMNS).issubset(frame.columns):
+        return pd.DataFrame(columns=_QUOTE_COLUMNS)
+
+    out = frame.loc[:, _QUOTE_COLUMNS].copy()
+    out["code"] = out["code"].astype(str).str.strip()
+    out["trade_date"] = out["trade_date"].astype(str).str[:10]
+    parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
+    for column in _NUMERIC_QUOTE_COLUMNS:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out = out.replace([float("inf"), float("-inf")], pd.NA)
+    out = out.dropna(subset=list(_REQUIRED_QUOTE_NUMERIC))
+    parsed_dates = parsed_dates.reindex(out.index)
+
+    price_cols = ["open", "high", "low", "close"]
+    valid = (out[price_cols] > 0).all(axis=1)
+    valid &= out["volume"] > 0
+    valid &= out["high"] >= out[["open", "close", "low"]].max(axis=1)
+    valid &= out["low"] <= out[["open", "close", "high"]].min(axis=1)
+    valid &= parsed_dates.notna()
+    valid &= out["code"].str.fullmatch(r"\d{6}", na=False)
+    valid &= out["code"].str.startswith(PREFIXES)
+    out = out.loc[valid].copy()
+    out["trade_date"] = parsed_dates.loc[valid].dt.strftime("%Y-%m-%d")
+    out = out.drop_duplicates(subset=["code", "trade_date"], keep="last")
+    out = out.sort_values(["code", "trade_date"]).reset_index(drop=True)
+
+    # change_pct 可由同一复权序列的相邻收盘价恢复；首行仍缺失则剔除。
+    computed_change = (
+        out.groupby("code", sort=False)["close"]
+        .pct_change(fill_method=None)
+        .mul(100)
+    )
+    out["change_pct"] = out["change_pct"].fillna(computed_change)
+    out = out.dropna(subset=["change_pct"]).copy()
+
+    # amount/turnover 不参与技术指标计算；缺失时保留为空，不能反过来
+    # 删除有效 OHLCV，也不能用 0 冒充真实观测。
+    out["amount"] = out["amount"].where(out["amount"] > 0)
+    out["turnover"] = out["turnover"].where(out["turnover"] >= 0)
+    return out.reset_index(drop=True)
+
+
 def _fetch_one(code, start):
     """拉取单只股票日线，返回 (code, rows, error)。"""
     try:
         df = adata.stock.market.get_market(stock_code=code, start_date=start)
         if df is None or df.empty:
             return code, [], None
-        rows = []
-        for _, r in df.iterrows():
-            rows.append(
-                (
-                    code,
-                    str(r["trade_date"])[:10],
-                    float(r.get("open", 0) or 0),
-                    float(r.get("high", 0) or 0),
-                    float(r.get("low", 0) or 0),
-                    float(r.get("close", 0) or 0),
-                    float(r.get("volume", 0) or 0),
-                    float(r.get("amount", 0) or 0),
-                    float(r.get("change_pct", 0) or 0),
-                    float(r.get("turnover_ratio", 0) or 0),
-                )
+        frame = df.copy()
+        frame["code"] = code
+        if "turnover" not in frame.columns and "turnover_ratio" in frame.columns:
+            frame["turnover"] = frame["turnover_ratio"]
+        for column in _QUOTE_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = None
+        valid = _sanitize_quote_frame(frame)
+        rows = [
+            tuple(None if pd.isna(value) else value for value in values)
+            for values in valid.loc[:, _QUOTE_COLUMNS].itertuples(
+                index=False,
+                name=None,
             )
+        ]
         return code, rows, None
     except Exception as e:
         return code, [], e
@@ -245,7 +312,8 @@ def _check_coverage(conn, expected, table="DailyQuote", expected_date=None):
     if isinstance(expected, int):
         expected_count = expected
         count = conn.execute(
-            f"SELECT COUNT(DISTINCT code) FROM {table} WHERE trade_date = ?",  # nosec
+            f"SELECT COUNT(DISTINCT code) FROM {table} "  # nosec
+            f"WHERE trade_date = ? AND {_VALID_QUOTE_SQL}",
             (latest,),
         ).fetchone()[0]
     else:
@@ -254,7 +322,8 @@ def _check_coverage(conn, expected, table="DailyQuote", expected_date=None):
         actual_codes = {
             str(row[0])
             for row in conn.execute(
-                f"SELECT DISTINCT code FROM {table} WHERE trade_date = ?",  # nosec
+                f"SELECT DISTINCT code FROM {table} "  # nosec
+                f"WHERE trade_date = ? AND {_VALID_QUOTE_SQL}",
                 (latest,),
             )
         }
@@ -297,6 +366,7 @@ def _check_history_coverage(
     # SQLite cannot bind identifiers; table has passed the allowlist.
     query = (
         f"SELECT code FROM {table} "  # nosec
+        f"WHERE {_VALID_QUOTE_SQL} "
         "GROUP BY code "
         "HAVING COUNT(DISTINCT trade_date) >= ?"
     )
@@ -314,7 +384,7 @@ def _check_history_coverage(
 
 def _target_date():
     """通过沪深300判断当前应追齐到的交易日。15:00前目标是上一交易日。"""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(_TZ)
     start = (now.date() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
     try:
         df = adata.stock.market.get_market_index(index_code="000300", start_date=start)
@@ -593,6 +663,7 @@ def load_all(min_rows=60):
     conn = _conn()
     df = pd.read_sql("SELECT * FROM DailyQuote ORDER BY code, trade_date", conn)
     conn.close()
+    df = _sanitize_quote_frame(df)
     if df.empty:
         return {}
     return {

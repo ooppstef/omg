@@ -14,7 +14,7 @@ def _nan(val):
     if val is None:
         return True
     try:
-        return math.isnan(float(val))
+        return not math.isfinite(float(val))
     except (TypeError, ValueError):
         return True
 
@@ -110,11 +110,18 @@ def _detect_pattern(df):
         return "双针探底"
 
     # 小阳企稳（自定义：涨跌幅 -0.5%~+1.5%，振幅收窄）
-    chg = float(last.get("change_pct", 0) or 0)
-    amp = float(last.get("amplitude", 0) or 0)
+    chg = None if _nan(last.get("change_pct")) else float(last["change_pct"])
+    amp = None if _nan(last.get("amplitude")) else float(last["amplitude"])
     if len(df) >= 4 and "amplitude" in df.columns:
         avg_amp = df["amplitude"].iloc[-4:-1].mean()
-        if -0.5 <= chg <= 1.5 and amp > 0 and avg_amp > 0 and amp <= avg_amp * 0.8:
+        if (
+            chg is not None
+            and amp is not None
+            and -0.5 <= chg <= 1.5
+            and amp > 0
+            and avg_amp > 0
+            and amp <= avg_amp * 0.8
+        ):
             return "小阳企稳"
 
     # TA-Lib: 十字星 (Doji)
@@ -158,9 +165,14 @@ def _pick_signal(df):
     prev_low = float(prev["low"])
     prev2_low = float(prev2["low"])
     lower = min(c, o) - low
-    chg = float(last.get("change_pct", 0) or 0)
-    prev_chg = float(prev.get("change_pct", 0) or 0)
-    prev2_chg = float(prev2.get("change_pct", 0) or 0)
+    changes = (
+        last.get("change_pct"),
+        prev.get("change_pct"),
+        prev2.get("change_pct"),
+    )
+    if any(_nan(value) for value in changes):
+        return None
+    chg, prev_chg, prev2_chg = (float(value) for value in changes)
 
     # 长下影修复：下影明显长于实体，且尾盘没有失控走弱。
     if rng > 0 and body > 0 and lower >= max(body * 1.8, rng * 0.35) and chg >= -1.5:
@@ -510,9 +522,6 @@ def _trigger_state(df, signal):
         state["score"] += 10
     elif close_loc_ok:
         state["score"] += 8
-    elif close_loc_repair_ok:
-        state["score"] += 4
-        state["risks"].append("收盘位置一般")
     else:
         state["notes"].append("收盘位置偏弱")
 

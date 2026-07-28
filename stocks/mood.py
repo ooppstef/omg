@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 from datetime import date, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from stocks.util import env_int, force_direct_http
+from stocks.util import env_int, finite_float, force_direct_http
 
 STATE_ICE = "冰点"
 STATE_REPAIR = "修复"
@@ -27,6 +28,7 @@ STATES = (
 )
 
 DEFAULT_DAYS = 8
+_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def zhaban_rate(limit_up: int, zhaban: int) -> float:
@@ -44,16 +46,23 @@ def _as_records(df: Optional[pd.DataFrame]) -> list[dict]:
 
 def _num(row: dict, *keys: str, default: float = 0.0) -> float:
     for key in keys:
-        if key in row and row[key] is not None and row[key] == row[key]:
-            try:
-                return float(row[key])
-            except (TypeError, ValueError):
-                continue
+        if key in row:
+            value = finite_float(row[key])
+            if value is not None:
+                return value
     return default
 
 
 def _int(row: dict, *keys: str, default: int = 0) -> int:
     return int(_num(row, *keys, default=float(default)))
+
+
+def _board_count(row: dict, *keys: str) -> Optional[int]:
+    for key in keys:
+        value = finite_float(row.get(key))
+        if value is not None and value >= 1 and value.is_integer():
+            return int(value)
+    return None
 
 
 def compute_mood_metrics(
@@ -65,12 +74,14 @@ def compute_mood_metrics(
     limit_up = len(zt_rows)
     zhaban = len(zb_rows)
     limit_down = len(dt_rows)
-    height = 0
+    board_counts: list[int] = []
     first_boards = 0
     for row in zt_rows:
-        boards = _int(row, "连板数", "昨日连板数")
-        height = max(height, boards)
-        if boards <= 1:
+        boards = _board_count(row, "连板数", "昨日连板数")
+        if boards is None:
+            continue
+        board_counts.append(boards)
+        if boards == 1:
             first_boards += 1
 
     premiums: list[float] = []
@@ -84,7 +95,14 @@ def compute_mood_metrics(
             except (TypeError, ValueError):
                 pass
     premium = sum(premiums) / len(premiums) if premiums else None
-    first_board_ratio = (first_boards / limit_up) if limit_up else 0.0
+    board_count_coverage = (
+        len(board_counts) / limit_up if limit_up else 0.0
+    )
+    board_stats_available = bool(limit_up) and len(board_counts) == limit_up
+    height = max(board_counts) if board_stats_available else None
+    first_board_ratio = (
+        first_boards / len(board_counts) if board_stats_available else None
+    )
     rate = zhaban_rate(limit_up, zhaban)
 
     # 至少要有当日涨停/跌停/炸板之一，避免「仅昨日池」误判
@@ -98,6 +116,7 @@ def compute_mood_metrics(
         "height": height,
         "premium": premium,
         "first_board_ratio": first_board_ratio,
+        "board_count_coverage": board_count_coverage,
         "prev_count": len(prev_rows),
     }
 
@@ -110,19 +129,24 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
     down = int(metrics.get("limit_down") or 0)
     zb = int(metrics.get("zhaban") or 0)
     rate = float(metrics.get("zhaban_rate") or 0.0)
-    height = int(metrics.get("height") or 0)
+    height_value = finite_float(metrics.get("height"))
+    height = int(height_value) if height_value is not None else None
     premium = metrics.get("premium")
-    first_ratio = float(metrics.get("first_board_ratio") or 0.0)
+    first_ratio = finite_float(metrics.get("first_board_ratio"))
 
     def base_why() -> list[str]:
         lines = [
             f"涨停{up}家 / 跌停{down}家 / 炸板{zb}家",
             f"炸板率{rate * 100:.0f}%（炸板/(涨停+炸板)）",
-            f"连板高度{height}板",
+            f"连板高度{height}板" if height is not None else "连板高度数据不足",
         ]
         if premium is not None:
             lines.append(f"昨日涨停今日均溢价{premium:+.1f}%")
-        lines.append(f"首板占比{first_ratio * 100:.0f}%")
+        lines.append(
+            f"首板占比{first_ratio * 100:.0f}%"
+            if first_ratio is not None
+            else "首板占比数据不足"
+        )
         return lines
 
     # 1) 退潮：亏钱效应主导
@@ -142,14 +166,22 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
     if up < 30:
         why = [
             "冰点：涨停稀少，进攻意愿弱",
-            f"涨停仅{up}家，高度{height}板",
+            (
+                f"涨停仅{up}家，高度{height}板"
+                if height is not None
+                else f"涨停仅{up}家，连板高度数据不足"
+            ),
             f"跌停{down}家，炸板率{rate * 100:.0f}%",
         ]
         return STATE_ICE, why
 
     # 3) 分歧：承接犹豫（炸板率分歧仅在涨停已达一定热度时启用）
-    high_up_weak_height = up >= 60 and height < 5 and down >= 15
-    mid_diverge = 10 <= down < 30 and height >= 3 and up < 60
+    high_up_weak_height = (
+        height is not None and up >= 60 and height < 5 and down >= 15
+    )
+    mid_diverge = (
+        height is not None and 10 <= down < 30 and height >= 3 and up < 60
+    )
     rate_diverge = up >= 30 and 0.30 <= rate <= 0.50
     if rate_diverge or mid_diverge or high_up_weak_height:
         why = ["分歧：资金承接犹豫"]
@@ -162,7 +194,13 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
         return STATE_DIVERGE, why + base_why()[:3]
 
     # 4) 主升：赚钱效应全面
-    if up >= 60 and height >= 5 and rate < 0.30 and down < 10:
+    if (
+        height is not None
+        and up >= 60
+        and height >= 5
+        and rate < 0.30
+        and down < 10
+    ):
         why = [
             "主升：涨停多、高度够、炸板低、跌停少",
             f"涨停{up}家，高度{height}板，炸板率{rate * 100:.0f}%",
@@ -172,7 +210,13 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
         return STATE_MAIN, why + base_why()[3:]
 
     # 5) 修复：升温但未高潮
-    if 30 <= up <= 60 and down < 10 and rate < 0.35 and 2 <= height <= 4:
+    if (
+        height is not None
+        and 30 <= up <= 60
+        and down < 10
+        and rate < 0.35
+        and 2 <= height <= 4
+    ):
         why = [
             "修复：情绪回暖但未到高潮",
             f"涨停{up}家，高度{height}板，跌停{down}家",
@@ -195,7 +239,7 @@ def _import_ak():
 
 def _recent_calendar_dates(n: int) -> list[str]:
     """多取日历日，后续用有数据的交易日截取。"""
-    today = date.today()
+    today = datetime.datetime.now(_TZ).date()
     return [
         (today - timedelta(days=i)).strftime("%Y%m%d")
         for i in range(n * 3 + 5)
@@ -265,7 +309,9 @@ def fetch_mood_history(days: Optional[int] = None) -> list[dict[str, Any]]:
         state, reasons = classify_mood(metrics)
         rows.append(
             {
-                "trade_date": d,
+                "trade_date": date.fromisoformat(
+                    f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+                ).isoformat(),
                 "metrics": metrics,
                 "state": state,
                 "reasons": reasons,
@@ -300,17 +346,24 @@ def print_mood_report(history: list[dict[str, Any]]) -> None:
     print("\n--- 当日指标 ---")
     premium = m.get("premium")
     premium_s = f"{premium:+.2f}%" if premium is not None else "-"
+    height_s = str(m["height"]) if m.get("height") is not None else "-"
+    first_ratio = finite_float(m.get("first_board_ratio"))
+    first_ratio_s = (
+        f"{first_ratio * 100:.0f}%" if first_ratio is not None else "-"
+    )
     print(
         f"涨停 {m['limit_up']}  跌停 {m['limit_down']}  炸板 {m['zhaban']}  "
-        f"炸板率 {m['zhaban_rate'] * 100:.1f}%  高度 {m['height']}  "
-        f"首板占比 {m['first_board_ratio'] * 100:.0f}%  昨涨停溢价 {premium_s}"
+        f"炸板率 {m['zhaban_rate'] * 100:.1f}%  高度 {height_s}  "
+        f"首板占比 {first_ratio_s}  昨涨停溢价 {premium_s}"
     )
 
     # 连板梯队摘要
     zt = latest.get("pools", {}).get("zt") or []
     ladder: dict[int, int] = {}
     for row in zt:
-        b = _int(row, "连板数")
+        b = _board_count(row, "连板数")
+        if b is None:
+            continue
         ladder[b] = ladder.get(b, 0) + 1
     if ladder:
         parts = [f"{k}板×{ladder[k]}" for k in sorted(ladder, reverse=True)]
@@ -324,10 +377,11 @@ def print_mood_report(history: list[dict[str, Any]]) -> None:
         mm = row["metrics"]
         prem = mm.get("premium")
         prem_s = f"{prem:+.1f}%" if prem is not None else "-"
+        height_s = str(mm["height"]) if mm.get("height") is not None else "-"
         print(
             f"{row['trade_date']:<10} {row['state']:<6} "
             f"{mm['limit_up']:>4} {mm['limit_down']:>4} {mm['zhaban']:>4} "
-            f"{mm['zhaban_rate'] * 100:>6.1f}% {mm['height']:>4} {prem_s:>8}"
+            f"{mm['zhaban_rate'] * 100:>6.1f}% {height_s:>4} {prem_s:>8}"
         )
     print()
 

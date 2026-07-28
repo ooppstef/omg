@@ -183,6 +183,34 @@ class TestTools(unittest.TestCase):
         ai_tools.clear_tool_cache()
 
     @patch("stocks.util.recent_date", return_value="2026-07-17")
+    @patch("stocks.mood.analyze", return_value=[{"state": "主升"}])
+    def test_cacheable_tools_refresh_after_ttl(self, mock_analyze, _day):
+        with (
+            patch.dict(os.environ, {"OMG_TOOL_CACHE_TTL_SECONDS": "10"}),
+            patch("time.monotonic", side_effect=[100.0, 100.0, 111.0, 111.0]),
+        ):
+            ai_tools.call("mood", {"days": 5})
+            ai_tools.call("mood", {"days": 5})
+
+        self.assertEqual(mock_analyze.call_count, 2)
+
+    @patch("stocks.util.recent_date", return_value="2026-07-17")
+    @patch("stocks.mood.analyze", return_value=[{"state": "主升"}])
+    def test_mutating_cached_result_does_not_poison_later_calls(
+        self,
+        mock_analyze,
+        _day,
+    ):
+        ai_tools.call("mood", {"days": 5})
+        cached = ai_tools.call("mood", {"days": 5})
+        cached["data"][0]["state"] = "被污染"
+
+        again = ai_tools.call("mood", {"days": 5})
+
+        self.assertEqual(again["data"][0]["state"], "主升")
+        mock_analyze.assert_called_once_with(days=5)
+
+    @patch("stocks.util.recent_date", return_value="2026-07-17")
     @patch("stocks.watch_list.get_watch_list_current_price", return_value=[])
     @patch("stocks.market.get_index_current_price")
     def test_list_with_errors_is_not_cached(self, mock_index, _watch, _day):
@@ -332,6 +360,29 @@ class TestTools(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["data"]["indexes"]), 2)
         self.assertIn("无数据", result["data"]["errors"][0])
+
+    @patch("stocks.watch_list.get_watch_list_current_price", return_value=[])
+    @patch("stocks.market.get_index_current_price")
+    def test_list_distinguishes_source_date_from_observation_time(
+        self,
+        mock_index,
+        _watch,
+    ):
+        mock_index.return_value = types.SimpleNamespace(
+            code="000001",
+            name="上证指数",
+            price=3000.0,
+            change_percent=1.0,
+            amount=1,
+            as_of="2026-07-21",
+        )
+
+        result = ai_tools.call("list", {})
+
+        self.assertEqual(result["data"]["as_of"], "2026-07-21")
+        self.assertEqual(result["data"]["as_of_dates"], ["2026-07-21"])
+        self.assertIn("observed_at", result["data"])
+        self.assertEqual(result["data"]["indexes"][0]["as_of"], "2026-07-21")
 
     def test_jsonable_converts_numpy_scalars_and_missing_values(self):
         import numpy as np
@@ -687,6 +738,12 @@ class TestSkills(unittest.TestCase):
         self.assertIn("暂无明确观察票", skill["body"])
         self.assertIn("主要用于", skill["body"])
         self.assertIn("关注建议」无具体代码", skill["body"])
+        self.assertIn("绝对成交额不能证明放量", skill["body"])
+        self.assertIn("启发式", skill["body"])
+        self.assertIn("时点", skill["body"])
+        self.assertIn("主线 0～3 条", skill["body"])
+        self.assertNotIn("主线 2～3 条", skill["body"])
+        self.assertNotIn("表述相对放量与否", skill["body"])
         self.assertNotIn("只在 `## 自选操作建议` 使用", skill["body"])
         self.assertNotIn("关注清单", skill["body"])
         self.assertNotIn(
@@ -696,12 +753,20 @@ class TestSkills(unittest.TestCase):
         self.assertIn("rank", ai_chat.SYSTEM)
         self.assertIn("watch_advice", ai_chat.SYSTEM)
         self.assertIn("量价", ai_chat.SYSTEM)
+        self.assertIn("绝对成交额", ai_chat.SYSTEM)
+        self.assertIn("启发式", ai_chat.SYSTEM)
+        self.assertIn("时点", ai_chat.SYSTEM)
         self.assertIn("明日观察推荐", ai_chat.SYSTEM)
         self.assertIn("独立涨跌榜", ai_chat.SYSTEM_RESEARCH)
         self.assertIn("自选操作建议", ai_chat.SYSTEM_RESEARCH)
         self.assertIn("明日观察推荐", ai_chat.SYSTEM_RESEARCH)
         self.assertIn("量能", ai_chat.SYSTEM_RESEARCH)
         self.assertNotIn("或本轮用了 rank", ai_chat.SYSTEM_RESEARCH)
+
+        theme = ai_skills.load("omg-theme-research")
+        self.assertIn("启发式", theme["body"])
+        self.assertIn("绝对成交额不能证明放量", theme["body"])
+        self.assertIn("时点", theme["body"])
 
     def test_resolve_auto_from_prompt(self):
         from stocks.ai import skills as ai_skills

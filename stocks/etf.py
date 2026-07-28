@@ -8,12 +8,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import adata
 import pandas as pd
 import requests
 
-from stocks.util import env_int, finite_float, fmt_chg
+from stocks.util import env_int, finite_float, fmt_chg, recent_date
 
 BENCH_CODE = "510300"
 STATE_START = "启动趋势"
@@ -43,6 +44,7 @@ CHANGE_SOURCE_ADATA = "adata"
 CHANGE_SOURCE_EM_SPOT = "eastmoney_spot"
 # 补齐价相对昨收允许偏离；超出则视为东财异常，放弃补齐
 _SPOT_MAX_DEV = 0.25
+_TZ = ZoneInfo("Asia/Shanghai")
 
 # 短线 / 中线阈值（同一套判定流水线）
 _HORIZON_CFG = {
@@ -101,35 +103,28 @@ def load_universe(path: Optional[str] = None) -> list[dict]:
         code = str(rec.get("code", "")).strip()
         if not code:
             continue
-        mcap = rec.get("mcap")
+        mcap = finite_float(rec.get("mcap"))
         rows.append(
             {
                 "code": code,
                 "name": str(rec.get("name", "") or "").strip(),
                 "category": str(rec.get("category", "") or "").strip(),
                 "theme": str(rec.get("theme", "") or "").strip(),
-                "mcap": float(mcap) if mcap is not None and pd.notna(mcap) else 0.0,
+                "mcap": mcap if mcap is not None and mcap >= 0 else 0.0,
             }
         )
     return rows
 
 
 def history_start_date(calendar_days: int = LOOKBACK_CALENDAR_DAYS) -> str:
-    return (datetime.date.today() - datetime.timedelta(days=calendar_days)).strftime(
-        "%Y-%m-%d"
-    )
+    return recent_date(calendar_days)
 
 
 def _prep_series(s: pd.Series) -> pd.Series:
     out = pd.to_numeric(s, errors="coerce")
-    out.index = pd.to_datetime(out.index)
-    return out.sort_index()
-
-
-def _align_series(*series_list: pd.Series) -> list[pd.Series]:
-    frames = [_prep_series(s) for s in series_list]
-    df = pd.concat(frames, axis=1, join="inner").dropna()
-    return [df.iloc[:, i] for i in range(df.shape[1])]
+    out.index = pd.to_datetime(out.index, errors="coerce")
+    out = out[~out.index.isna()]
+    return out[~out.index.duplicated(keep="last")].sort_index()
 
 
 def _empty_features() -> dict:
@@ -139,6 +134,7 @@ def _empty_features() -> dict:
         "ret_20": None,
         "excess_10": None,
         "excess_20": None,
+        "benchmark_available": False,
         "ma20": None,
         "ma60": None,
         "ma20_slope": None,
@@ -147,11 +143,13 @@ def _empty_features() -> dict:
         "ma_bull": None,
         "ma_bear": None,
         "vol_ratio": None,
+        "volume_available": False,
         "range_pos_60": None,
         "vol_20": None,
         "vol_60": None,
         "ma_spread": None,
         "close": None,
+        "as_of": None,
         "ok": False,
     }
 
@@ -162,12 +160,29 @@ def compute_features(
     bench_close: pd.Series,
 ) -> dict:
     empty = _empty_features()
-    c, a, b = _align_series(close, amount, bench_close)
+    # 价格独立决定趋势特征；基准和成交额只决定各自派生项，不能因
+    # 任一辅助序列末日缺失而把末日收盘价也删掉。
+    c = (
+        _prep_series(close)
+        .replace([math.inf, -math.inf], float("nan"))
+        .dropna()
+    )
+    c = c[c > 0]
     if len(c) < MIN_BARS:
         return empty
 
+    b = _prep_series(bench_close).replace(
+        [math.inf, -math.inf], float("nan")
+    ).reindex(c.index)
+    b = b.where(b > 0)
+    a = _prep_series(amount).replace(
+        [math.inf, -math.inf], float("nan")
+    ).reindex(c.index)
+    a = a.where(a > 0)
+
     if len(c) > FEATURE_TAIL:
-        c, a, b = c.iloc[-FEATURE_TAIL:], a.iloc[-FEATURE_TAIL:], b.iloc[-FEATURE_TAIL:]
+        c, b = c.iloc[-FEATURE_TAIL:], b.iloc[-FEATURE_TAIL:]
+        a = a.reindex(c.index)
 
     ma20 = c.rolling(20, min_periods=20).mean()
     ma60 = c.rolling(60, min_periods=60).mean()
@@ -181,6 +196,8 @@ def compute_features(
 
     def last_excess(n: int) -> Optional[float]:
         if len(c) <= n:
+            return None
+        if pd.isna(b.iloc[-1]) or pd.isna(b.iloc[-1 - n]):
             return None
         er = c.iloc[-1] / c.iloc[-1 - n] - 1.0
         br = b.iloc[-1] / b.iloc[-1 - n] - 1.0
@@ -215,13 +232,18 @@ def compute_features(
     vol_20 = float(ret.iloc[-20:].std()) if len(ret) >= 20 else None
     vol_60 = float(ret.iloc[-60:].std()) if len(ret) >= 60 else None
     ma_spread = abs(ma20_now - ma60_now) / close_now
+    excess_10 = last_excess(10)
+    excess_20 = last_excess(20)
 
     return {
         "ret_5": last_ret(5),
         "ret_10": last_ret(10),
         "ret_20": last_ret(20),
-        "excess_10": last_excess(10),
-        "excess_20": last_excess(20),
+        "excess_10": excess_10,
+        "excess_20": excess_20,
+        "benchmark_available": (
+            excess_10 is not None and excess_20 is not None
+        ),
         "ma20": ma20_now,
         "ma60": ma60_now,
         "ma20_slope": ma20_slope,
@@ -230,11 +252,13 @@ def compute_features(
         "ma_bull": close_now > ma20_now > ma60_now,
         "ma_bear": close_now < ma20_now < ma60_now,
         "vol_ratio": vol_ratio,
+        "volume_available": vol_ratio is not None,
         "range_pos_60": range_pos,
         "vol_20": vol_20,
         "vol_60": vol_60,
         "ma_spread": ma_spread,
         "close": close_now,
+        "as_of": c.index[-1].strftime("%Y-%m-%d"),
         "ok": True,
     }
 
@@ -264,12 +288,16 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
 
     cfg = _HORIZON_CFG[horizon]
     slope = _feature_number(features, "ma20_slope", 0.0)
-    vol_ratio = _feature_number(features, "vol_ratio", 1.0)
+    vol_ratio_value = finite_float(features.get("vol_ratio"))
+    has_volume = vol_ratio_value is not None
+    vol_ratio = vol_ratio_value if vol_ratio_value is not None else 0.0
     range_pos = _feature_number(features, "range_pos_60", 0.5)
     ma_spread = _feature_number(features, "ma_spread", 0.0)
     vol_20 = features.get("vol_20")
     vol_60 = features.get("vol_60")
-    excess = _feature_number(features, cfg["excess_key"], 0.0)
+    excess_value = finite_float(features.get(cfg["excess_key"]))
+    has_excess = excess_value is not None
+    excess = excess_value if excess_value is not None else 0.0
     ret = _feature_number(features, cfg["ret_key"], 0.0)
     ret_5 = _feature_number(features, "ret_5", 0.0)
     above_ma20 = features.get("above_ma20")
@@ -284,8 +312,8 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
             f"MA20斜率{_pct(slope)}",
             f"60日位置{_num(range_pos * 100, 0)}%",
             f"{ret_name}涨跌{_pct(ret)}",
-            f"{excess_name}{_pct(excess)}",
-            f"量比(5/20日){_num(vol_ratio)}",
+            f"{excess_name}{_pct(excess_value)}",
+            f"量比(5/20日){_num(vol_ratio_value)}",
         ]
 
     chop_vol = (
@@ -311,26 +339,35 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
 
     if cfg["use_ret_5_for_top"]:
         top_hit = range_pos >= cfg["top_range"] and (
-            ret_5 < cfg["top_ret_hard"] or (ret_5 <= 0 and vol_ratio >= cfg["top_vol"])
+            ret_5 < cfg["top_ret_hard"]
+            or (
+                has_volume
+                and ret_5 <= 0
+                and vol_ratio >= cfg["top_vol"]
+            )
         )
         top_detail = []
         if range_pos >= cfg["top_range"]:
             top_detail.append(f"处60日偏高位({_num(range_pos * 100, 0)}%)")
         if ret_5 < cfg["top_ret_hard"]:
             top_detail.append(f"近5日回落({_pct(ret_5)})")
-        elif ret_5 <= 0 and vol_ratio >= cfg["top_vol"]:
+        elif has_volume and ret_5 <= 0 and vol_ratio >= cfg["top_vol"]:
             top_detail.append(f"高位滞涨放量(5日{_pct(ret_5)}，量比{_num(vol_ratio)})")
     else:
         top_hit = range_pos >= cfg["top_range"] and (
             ret < cfg["top_ret_hard"]
-            or (ret <= 0.01 and vol_ratio >= cfg["top_vol"])
+            or (
+                has_volume
+                and ret <= 0.01
+                and vol_ratio >= cfg["top_vol"]
+            )
         )
         top_detail = []
         if range_pos >= cfg["top_range"]:
             top_detail.append(f"处60日偏高位({_num(range_pos * 100, 0)}%)")
         if ret < cfg["top_ret_hard"]:
             top_detail.append(f"{ret_name}明显回落({_pct(ret)})")
-        elif ret <= 0.01 and vol_ratio >= cfg["top_vol"]:
+        elif has_volume and ret <= 0.01 and vol_ratio >= cfg["top_vol"]:
             top_detail.append(f"高位滞涨({ret_name}{_pct(ret)}，量比{_num(vol_ratio)})")
 
     if top_hit:
@@ -341,11 +378,12 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
             f"{label}见顶：跌破MA20且均线走平/下行",
             f"60日位置仍偏高({_num(range_pos * 100, 0)}%)",
             f"MA20斜率{_pct(slope)}",
-            f"{excess_name}{_pct(excess)}",
+            f"{excess_name}{_pct(excess_value)}",
         ]
 
     if (
         above_ma20 is False
+        and has_excess
         and excess < -0.04
         and range_pos >= 0.45
         and slope <= 0
@@ -353,7 +391,7 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
     ):
         return STATE_WEAKEN, [
             f"{label}见顶：破位且显著跑输大盘",
-            f"跌破MA20，{excess_name}{_pct(excess)}",
+            f"跌破MA20，{excess_name}{_pct(excess_value)}",
             f"60日位置{_num(range_pos * 100, 0)}%，{ret_name}{_pct(ret)}",
         ]
 
@@ -361,13 +399,15 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
         return STATE_DOWN, [
             f"{label}空头：价格<MA20<MA60（空头排列）",
             f"MA20下行({_pct(slope)})，{ret_name}{_pct(ret)}",
-            f"{excess_name}{_pct(excess)}，量比{_num(vol_ratio)}",
+            f"{excess_name}{_pct(excess_value)}，量比{_num(vol_ratio_value)}",
         ]
 
     start_ok = (
         above_ma20
         and slope > cfg["start_slope"]
+        and has_excess
         and excess > cfg["start_excess"]
+        and has_volume
         and vol_ratio >= cfg["start_vol"]
     )
     start_block = []
@@ -382,16 +422,16 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
         return STATE_START, [
             f"{label}启动：站上MA20 + 均线转多 + 超额转正 + 放量",
             f"MA20斜率{_pct(slope)}（阈值>{_pct(cfg['start_slope'])}）",
-            f"{excess_name}{_pct(excess)}，量比{_num(vol_ratio)}",
+            f"{excess_name}{_pct(excess_value)}，量比{_num(vol_ratio)}",
             f"60日位置{_num(range_pos * 100, 0)}%（尚未极端高位）",
         ]
 
     if cfg["strong_need_excess"]:
-        if ma_bull and slope >= 0 and excess >= 0:
+        if ma_bull and slope >= 0 and has_excess and excess >= 0:
             return STATE_STRONG, [
                 f"{label}强趋势：多头排列(价>MA20>MA60)且未跑输大盘",
-                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
-                f"60日位置{_num(range_pos * 100, 0)}%，量比{_num(vol_ratio)}",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess_value)}",
+                f"60日位置{_num(range_pos * 100, 0)}%，量比{_num(vol_ratio_value)}",
             ]
         if (
             above_ma20
@@ -401,19 +441,25 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
         ):
             return STATE_STRONG, [
                 f"{label}强趋势：站上MA20且{ret_name}涨幅较大({_pct(ret)})",
-                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess_value)}",
             ]
     else:
         if ma_bull and slope >= 0:
             return STATE_STRONG, [
                 f"{label}强趋势：多头排列且均线未下行",
-                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess_value)}",
                 f"60日位置{_num(range_pos * 100, 0)}%",
             ]
-        if cfg["strong_use_ma60"] and features.get("above_ma60") and slope > 0 and excess > 0:
+        if (
+            cfg["strong_use_ma60"]
+            and features.get("above_ma60")
+            and slope > 0
+            and has_excess
+            and excess > 0
+        ):
             return STATE_STRONG, [
                 f"{label}强趋势：站上MA60 + 均线向上 + 超额为正",
-                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess_value)}",
             ]
 
     if cfg["down_alt_ret"] is None:
@@ -425,7 +471,7 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
                 why[0] += "跌破MA20且均线下行"
             return STATE_DOWN, why + [
                 f"MA20斜率{_pct(slope)}，{ret_name}{_pct(ret)}",
-                f"{excess_name}{_pct(excess)}",
+                f"{excess_name}{_pct(excess_value)}",
             ]
     else:
         if ma_bear or (not above_ma20 and ret < cfg["down_alt_ret"]):
@@ -435,7 +481,7 @@ def classify_horizon(features: dict, horizon: str) -> tuple[str, list[str]]:
             else:
                 why[0] += f"跌破MA20且{ret_name}弱势({_pct(ret)})"
             return STATE_DOWN, why + [
-                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess)}",
+                f"MA20斜率{_pct(slope)}，{excess_name}{_pct(excess_value)}",
             ]
 
     why = [f"{label}未满足明确多空条件，判为震荡"] + metrics()[:4]
@@ -472,7 +518,7 @@ def build_comment(row: dict) -> str:
         if mid and short and mid != short:
             text += f"；中线={mid}"
         chg = row.get("change_pct")
-        if isinstance(chg, (int, float)) and chg == chg:
+        if finite_float(chg) is not None:
             text += f"；{_change_label(row)}{fmt_chg(chg)}"
         return text
     return "数据不足，暂无点评"
@@ -487,7 +533,7 @@ def build_reason_block(row: dict) -> str:
     if mid_rs:
         lines.append("中线理由: " + "；".join(mid_rs[:3]))
     chg = row.get("change_pct")
-    if isinstance(chg, (int, float)) and chg == chg:
+    if finite_float(chg) is not None:
         lines.append(f"{_change_label(row)}: {fmt_chg(chg)}")
     return "\n".join(f"   {x}" for x in lines) if lines else "   理由: 暂无"
 
@@ -580,11 +626,8 @@ def fetch_etf_spot_em(
     if prev_close is not None and prev_close > 0:
         if abs(close - prev_close) / prev_close > _SPOT_MAX_DEV:
             return None
-    chg = data.get("f170")
-    try:
-        change_pct = float(chg) / 100.0 if chg is not None else None
-    except (TypeError, ValueError):
-        change_pct = None
+    chg = finite_float(data.get("f170"))
+    change_pct = chg / 100.0 if chg is not None else None
     amount = finite_float(data.get("f48"))
     if amount is not None and amount < 0:
         amount = None
@@ -616,7 +659,7 @@ def _normalize_etf_frame(df: Optional[pd.DataFrame], start_date: str) -> pd.Data
         out = df.copy()
         if "trade_date" not in out.columns or "close" not in out.columns:
             return empty
-        out["trade_date"] = out["trade_date"].astype(str).str[:10]
+        parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
         out["close"] = pd.to_numeric(out["close"], errors="coerce")
         out["amount"] = (
             pd.to_numeric(out["amount"], errors="coerce")
@@ -627,7 +670,13 @@ def _normalize_etf_frame(df: Optional[pd.DataFrame], start_date: str) -> pd.Data
             out["change_pct"] = pd.to_numeric(out["change_pct"], errors="coerce")
         else:
             out["change_pct"] = pd.NA
-        out = out.dropna(subset=["close"])
+        out = out.replace([math.inf, -math.inf], pd.NA)
+        valid = parsed_dates.notna() & (out["close"] > 0)
+        out = out.loc[valid].copy()
+        if out.empty:
+            return empty
+        out["trade_date"] = parsed_dates.loc[valid].dt.strftime("%Y-%m-%d")
+        out["amount"] = out["amount"].where(out["amount"] > 0)
         out = out.drop_duplicates(subset=["trade_date"], keep="last")
         out = out.loc[out["trade_date"] >= start_date]
         cols = [c for c in _EMPTY_COLS if c in out.columns]
@@ -647,12 +696,12 @@ def resolve_target_as_of(bench_frame: pd.DataFrame) -> str:
     复盘对齐日：优先宽基最新交易日；若宽基本身缺今日且交易时段可取到实时，
     则用今日。休市日要求快照日期为今日且成交额>0，避免把冻价当成新交易日。
     """
-    today = datetime.date.today().strftime("%Y-%m-%d")
+    now = datetime.datetime.now(_TZ)
+    today = now.date().isoformat()
     bench_last = frame_last_date(bench_frame) or today
     if bench_last >= today:
         return bench_last
 
-    now = datetime.datetime.now()
     if now.weekday() >= 5 or now.hour < 9:
         return bench_last
 
@@ -670,6 +719,23 @@ def resolve_target_as_of(bench_frame: pd.DataFrame) -> str:
     return today
 
 
+def _is_partial_spot_day(
+    target_as_of: str,
+    *,
+    now: Optional[datetime.datetime] = None,
+) -> bool:
+    """目标日尚未收盘时，实时成交额只是半日累计，不能与完整日比较。"""
+    current = now or datetime.datetime.now(_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_TZ)
+    else:
+        current = current.astimezone(_TZ)
+    return (
+        str(target_as_of)[:10] == current.date().isoformat()
+        and current.time() < datetime.time(15, 0)
+    )
+
+
 def ensure_etf_as_of(
     frame: pd.DataFrame,
     fund_code: str,
@@ -684,16 +750,30 @@ def ensure_etf_as_of(
         dates = frame["trade_date"].astype(str).str[:10]
         frame = frame.loc[dates <= target_as_of].reset_index(drop=True)
 
+    historical_amount = (
+        finite_float(frame.iloc[-1].get("amount"))
+        if frame is not None and not frame.empty
+        else None
+    )
     meta = {
         "as_of": frame_last_date(frame),
         "change_source": CHANGE_SOURCE_ADATA,
         "patched": False,
+        "volume_status": (
+            "historical"
+            if historical_amount is not None and historical_amount > 0
+            else "missing"
+        ),
     }
     if frame is None or frame.empty:
         return frame if frame is not None else pd.DataFrame(columns=_EMPTY_COLS), meta
 
     last = meta["as_of"]
     if last is None or last >= target_as_of:
+        if last == target_as_of and _is_partial_spot_day(target_as_of):
+            frame = frame.copy()
+            frame.loc[frame.index[-1], "amount"] = pd.NA
+            meta["volume_status"] = "partial_session"
         return frame, meta
 
     prev_close = finite_float(frame.iloc[-1].get("close"))
@@ -710,16 +790,20 @@ def ensure_etf_as_of(
     if close <= 0:
         return frame, meta
 
-    change_pct = spot.get("change_pct")
+    change_pct = finite_float(spot.get("change_pct"))
     if change_pct is None:
         change_pct = (close / prev_close - 1.0) * 100.0
 
-    # amount 缺失时沿用昨额，避免 _align_series.dropna 把补齐日整行丢掉
     amount = finite_float(spot.get("amount"))
-    if amount is None or amount <= 0:
-        amount = finite_float(frame.iloc[-1].get("amount"))
-    if amount is None or amount <= 0:
-        amount = 1.0
+    if _is_partial_spot_day(target_as_of):
+        # 盘中累计额与历史完整日不可比；保留价格，但显式禁用量比。
+        amount = None
+        volume_status = "partial_session"
+    elif amount is None or amount <= 0:
+        amount = None
+        volume_status = "missing"
+    else:
+        volume_status = "complete"
 
     patch = {
         "trade_date": target_as_of,
@@ -727,7 +811,11 @@ def ensure_etf_as_of(
         "amount": amount,
         "change_pct": change_pct,
     }
-    out = pd.concat([frame, pd.DataFrame([patch])], ignore_index=True)
+    out = frame.copy()
+    new_index = len(out)
+    out = out.reindex(range(new_index + 1))
+    for column, value in patch.items():
+        out.at[new_index, column] = value
     out = out.drop_duplicates(subset=["trade_date"], keep="last")
     out = out.sort_values("trade_date").reset_index(drop=True)
     meta.update(
@@ -735,6 +823,7 @@ def ensure_etf_as_of(
             "as_of": target_as_of,
             "change_source": CHANGE_SOURCE_EM_SPOT,
             "patched": True,
+            "volume_status": volume_status,
         }
     )
     return out, meta
@@ -756,7 +845,8 @@ def _frame_ohlc_series(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         empty = pd.Series(dtype=float)
         return empty, empty
     indexed = frame.set_index("trade_date")
-    indexed.index = pd.to_datetime(indexed.index)
+    indexed.index = pd.to_datetime(indexed.index, errors="coerce")
+    indexed = indexed[~indexed.index.isna()]
     close = pd.to_numeric(indexed["close"], errors="coerce").sort_index()
     amount = (
         pd.to_numeric(indexed["amount"], errors="coerce").sort_index()
@@ -767,10 +857,7 @@ def _frame_ohlc_series(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 
 
 def _parse_change_pct(value) -> Optional[float]:
-    try:
-        return float(value) if pd.notna(value) else None
-    except (TypeError, ValueError):
-        return None
+    return finite_float(value)
 
 
 def analyze_one(
@@ -795,6 +882,7 @@ def analyze_one(
         "target_as_of": target_as_of,
         "change_source": CHANGE_SOURCE_ADATA,
         "patched": False,
+        "volume_status": "historical",
         "features": {},
         "comment": "行情不足",
     }
@@ -807,8 +895,15 @@ def analyze_one(
         row["as_of"] = asof_meta.get("as_of")
         row["change_source"] = asof_meta.get("change_source") or CHANGE_SOURCE_ADATA
         row["patched"] = bool(asof_meta.get("patched"))
+        row["volume_status"] = asof_meta.get("volume_status") or "missing"
     else:
         row["as_of"] = frame_last_date(frame)
+        latest_amount = finite_float(frame.iloc[-1].get("amount"))
+        row["volume_status"] = (
+            "historical"
+            if latest_amount is not None and latest_amount > 0
+            else "missing"
+        )
 
     close, amount = _frame_ohlc_series(frame)
     result = classify_etf(close, amount, bench_close)
@@ -929,7 +1024,7 @@ def print_etf_report(rows: list[dict]) -> None:
 
     target = next((r.get("target_as_of") for r in rows if r.get("target_as_of")), None)
     print("\n=== 主题 ETF 走势点评（短线+中线）===")
-    print("说明: 宇宙=每主题规模最大1只；对照=510300 沪深300ETF。")
+    print("说明: 宇宙=静态清单中每主题1只代表ETF；对照=510300 沪深300ETF。")
     print("      短线≈5-20日，中线≈20-60日；每条含判定理由（规则+关键数字）。")
     if target:
         print(f"      对齐目标日={target}；缺 K 线时用东财实时补齐，并标注来源。\n")

@@ -2,10 +2,14 @@ import unittest
 
 import pandas as pd
 
-from stocks.filter.algo import _pullback_state
+from stocks.filter.algo import _nan, _pullback_state
 
 
 class TestPullbackIndexing(unittest.TestCase):
+    def test_nonfinite_indicator_is_missing(self):
+        self.assertTrue(_nan(float("inf")))
+        self.assertTrue(_nan(float("-inf")))
+
     def test_shifted_index_does_not_change_pullback_result(self):
         rows = []
         for pos in range(20):

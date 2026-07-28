@@ -10,6 +10,22 @@ get_recent_date = recent_date
 _finite_float = finite_float
 
 
+def _normalize_trade_dates(df):
+    if df is None or df.empty or "trade_date" not in df.columns:
+        return pd.DataFrame()
+    out = df.copy()
+    parsed = pd.to_datetime(
+        out["trade_date"], errors="coerce", format="mixed"
+    )
+    out = out.loc[parsed.notna()].copy()
+    out["trade_date"] = parsed.loc[parsed.notna()].dt.strftime("%Y-%m-%d")
+    return (
+        out.drop_duplicates(subset=["trade_date"], keep="last")
+        .sort_values("trade_date")
+        .reset_index(drop=True)
+    )
+
+
 def east_top_list(top=30, print_result=True):
     # 东方财富网热门排行（同花顺接口暂不可用）
     res_df = adata.sentiment.hot.pop_rank_100_east()
@@ -21,7 +37,7 @@ def east_top_list(top=30, print_result=True):
                 row["short_name"],
                 row["price"],
                 row["change_pct"],
-                "0",
+                None,
             )
         )
     stock_current_prices = stock_current_prices[:top]
@@ -45,13 +61,21 @@ def hot_concept_ths(top=8, print_result=True):
 
 def _calculate_strength_scores(excess_returns, amounts):
     """绝对强度 = 超额收益 × (1 + log(成交额/中位数成交额 + 1))"""
-    median_amount = amounts.median()
-    if median_amount == 0:
+    valid_amounts = pd.to_numeric(amounts, errors="coerce").replace(
+        [math.inf, -math.inf], pd.NA
+    )
+    valid_amounts = valid_amounts[valid_amounts > 0]
+    median_amount = _finite_float(valid_amounts.median())
+    if median_amount is None or median_amount <= 0:
         median_amount = 1
 
     def calc(excess, amount):
+        excess = _finite_float(excess)
+        amount = _finite_float(amount)
+        if excess is None or amount is None or amount <= 0:
+            return float("nan")
         ratio = amount / median_amount
-        multiplier = math.log(ratio + 1) if ratio > 0 else 0
+        multiplier = math.log1p(ratio)
         return round(excess * (1 + multiplier), 2)
 
     return pd.Series(
@@ -64,9 +88,10 @@ def _get_benchmark_returns(start_date, days=10, verbose=True):
     """获取沪深300过去N天涨幅"""
     try:
         df = adata.stock.market.get_market_index(index_code='000300', start_date=start_date)
-        if df is None or df.empty:
+        df = _normalize_trade_dates(df)
+        if df.empty:
             return {}
-        df = df.sort_values('trade_date').tail(days)
+        df = df.tail(days)
         result = {}
         for trade_date, change_pct in zip(df["trade_date"], df["change_pct"]):
             value = _finite_float(change_pct)
@@ -129,7 +154,8 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
         name = row.get('name')
         try:
             df = adata.stock.market.get_market_concept_ths(index_code=code)
-            if df is None or df.empty:
+            df = _normalize_trade_dates(df)
+            if df.empty:
                 return []
             df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
             results = []
@@ -139,7 +165,7 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
                     continue
                 change_pct = _finite_float(r.get("change_pct"))
                 amount = _finite_float(r.get("amount"))
-                if change_pct is None or amount is None:
+                if change_pct is None or amount is None or amount <= 0:
                     continue
                 results.append({
                     'code': code, 'name': name, 'date': date,
@@ -229,7 +255,11 @@ def concept_strength_top10(days=10, top=10, print_result=True, exclude=None):
 
 def concept_strength_chart(concept_names, days=10):
     """
-    绘制概念板块的强度曲线（支持多板块对比）
+    绘制概念板块的相对活跃强度趋势（支持多板块对比）。
+
+    与每日横截面榜不同，这里的量能因子以每个板块自身窗口内的
+    成交额中位数为基准，适合观察单个板块的活跃度变化，不代表
+    板块间绝对成交规模。
     concept_names: 板块名称或列表（支持模糊匹配）
     """
     import matplotlib.pyplot as plt
@@ -276,16 +306,23 @@ def concept_strength_chart(concept_names, days=10):
         
         try:
             df = adata.stock.market.get_market_concept_ths(index_code=code)
-            if df is None or df.empty:
+            df = _normalize_trade_dates(df)
+            if df.empty:
                 print(f"获取{name}数据失败")
                 continue
         except Exception as e:
             print(f"获取{name}数据失败: {e}")
             continue
         
-        df = df[df['trade_date'] >= start_date].sort_values('trade_date').tail(days)
-        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
-        median_amount = df['amount'].median() or 1
+        df = df[df['trade_date'] >= start_date].tail(days)
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        valid_amounts = df["amount"].replace(
+            [math.inf, -math.inf], pd.NA
+        )
+        valid_amounts = valid_amounts[valid_amounts > 0]
+        median_amount = _finite_float(valid_amounts.median())
+        if median_amount is None or median_amount <= 0:
+            continue
 
         dates, strengths = [], []
         for _, r in df.iterrows():
@@ -294,7 +331,7 @@ def concept_strength_chart(concept_names, days=10):
                 continue
             change_pct = _finite_float(r.get("change_pct"))
             amount = _finite_float(r.get("amount"))
-            if change_pct is None or amount is None:
+            if change_pct is None or amount is None or amount <= 0:
                 continue
             excess = change_pct - benchmark[date]
             ratio = amount / median_amount
@@ -328,9 +365,9 @@ def concept_strength_chart(concept_names, days=10):
     
     ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
     max_days = max(len(dates) for dates in series_dates.values())
-    ax.set_title(f'概念板块绝对强度对比 (近{max_days}天)')
+    ax.set_title(f'概念板块相对活跃强度趋势 (近{max_days}天)')
     ax.set_xlabel('日期')
-    ax.set_ylabel('绝对强度')
+    ax.set_ylabel('超额收益 × 自身量能因子')
     ax.legend(loc='best')
     ax.grid(True, alpha=0.3)
     

@@ -59,6 +59,18 @@ class TestMoodMetrics(unittest.TestCase):
         self.assertFalse(math.isnan(m["premium"]))
         self.assertEqual(m["premium"], -8.0)
 
+    def test_missing_board_counts_are_not_treated_as_first_boards(self):
+        m = compute_mood_metrics(
+            [{"代码": "1"}, {"代码": "2", "连板数": 1}],
+            [],
+            [],
+            [],
+        )
+
+        self.assertIsNone(m["height"])
+        self.assertIsNone(m["first_board_ratio"])
+        self.assertEqual(m["board_count_coverage"], 0.5)
+
     @patch("stocks.mood._recent_calendar_dates", return_value=["20260716"])
     @patch("stocks.mood.fetch_pools_for_date")
     def test_history_skips_date_when_critical_pool_fails(

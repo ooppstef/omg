@@ -130,6 +130,13 @@ class TestRankAnalyze(unittest.TestCase):
         self.assertEqual(data["meta"]["losers_n"], 2)
         self.assertEqual(data["meta"]["scanned"], len(self._frame()))
         self.assertGreater(data["meta"]["filtered"], 0)
+        self.assertIsNone(data["as_of"])
+        self.assertEqual(data["as_of_dates"], [])
+        self.assertIn("observed_at", data)
+        self.assertEqual(
+            data["data_time_status"],
+            "provider_trade_date_unavailable",
+        )
         # 涨幅 10 的两只：300001 先于 600100（code 升序）
         self.assertEqual(
             [r["code"] for r in data["gainers"]],

@@ -216,13 +216,17 @@ def _row_payload(
     industry: Optional[str],
     concepts: list[str],
 ) -> dict[str, Any]:
+    amount = finite_float(row["amount"])
+    turnover = finite_float(row["turnover"])
     return {
         "code": str(row["code"]),
         "name": str(row["name"]),
         "change_pct": float(row["change_pct"]),
         "price": finite_float(row["price"]),
-        "amount": finite_float(row["amount"]),
-        "turnover": finite_float(row["turnover"]),
+        "amount": amount if amount is not None and amount >= 0 else None,
+        "turnover": (
+            turnover if turnover is not None and turnover >= 0 else None
+        ),
         "industry": industry,
         "concepts": list(concepts),
     }
@@ -425,9 +429,12 @@ def analyze(
         tag_miss = _attach_tags(gainer_rows, ind, cons)
         tag_miss += _attach_tags(loser_rows, ind, cons)
 
-    as_of = datetime.now(_TZ).strftime("%Y-%m-%dT%H:%M:%S")
+    observed_at = datetime.now(_TZ).isoformat(timespec="seconds")
     return {
-        "as_of": as_of,
+        "as_of": None,
+        "as_of_dates": [],
+        "observed_at": observed_at,
+        "data_time_status": "provider_trade_date_unavailable",
         "universe": UNIVERSE,
         "gainers": gainer_rows,
         "losers": loser_rows,

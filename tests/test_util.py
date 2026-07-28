@@ -8,7 +8,25 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from stocks.util import force_direct_http
+from stocks.util import fmt_chg, force_direct_http
+
+
+class TestFmtChg(unittest.TestCase):
+    def test_formats_finite_numeric_values(self):
+        self.assertEqual(fmt_chg(1.234), "+1.23%")
+        self.assertEqual(fmt_chg("-0.5"), "-0.50%")
+
+    def test_rejects_nonfinite_and_nonnumeric_values(self):
+        for value in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            None,
+            "bad",
+            True,
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(fmt_chg(value), "-")
 
 
 class TestForceDirectHttp(unittest.TestCase):

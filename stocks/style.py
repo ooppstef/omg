@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import math
 from typing import Any, Optional
 
 import adata
 import pandas as pd
 
-from stocks.util import env_int
+from stocks.util import env_int, recent_date
 
 STATE_TECH = "科技虹吸"
 STATE_SMALL = "小盘占优"
@@ -43,7 +43,12 @@ def _pct(v: Optional[float]) -> str:
 
 
 def _ret(series: pd.Series, n: int) -> Optional[float]:
-    s = pd.to_numeric(series, errors="coerce").dropna()
+    s = (
+        pd.to_numeric(series, errors="coerce")
+        .replace([float("inf"), float("-inf")], pd.NA)
+        .dropna()
+    )
+    s = s[s > 0]
     if len(s) < n + 1:
         return None
     a, b = float(s.iloc[-(n + 1)]), float(s.iloc[-1])
@@ -58,7 +63,15 @@ def compute_style_features(closes: dict[str, pd.Series]) -> dict[str, Any]:
         return {"ok": False}
 
     # 对齐日期
-    frame = pd.DataFrame({k: closes[k] for k in needed}).dropna(how="any")
+    frame = pd.DataFrame({k: closes[k] for k in needed})
+    frame.index = pd.to_datetime(frame.index, errors="coerce")
+    frame = frame[~frame.index.isna()]
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    frame = frame.apply(pd.to_numeric, errors="coerce")
+    frame = frame.replace([float("inf"), float("-inf")], pd.NA).dropna(
+        how="any"
+    )
+    frame = frame[(frame > 0).all(axis=1)]
     if len(frame) < 25:
         return {"ok": False}
 
@@ -99,9 +112,13 @@ def compute_style_features(closes: dict[str, pd.Series]) -> dict[str, Any]:
 
 def _req(feat: dict[str, Any], key: str) -> float:
     value = feat.get(key)
-    if value is None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
         raise KeyError(key)
-    return float(value)
+    if not math.isfinite(number):
+        raise KeyError(key)
+    return number
 
 
 def classify_style(feat: dict[str, Any]) -> tuple[str, list[str]]:
@@ -219,12 +236,15 @@ def fetch_index_close(index_code: str, start_date: str) -> pd.Series:
     date_col = "trade_date" if "trade_date" in frame.columns else "trade_time"
     frame[date_col] = frame[date_col].astype(str).str[:10]
     close = pd.to_numeric(frame["close"], errors="coerce")
-    series = pd.Series(close.values, index=pd.to_datetime(frame[date_col]))
+    close = close.where(close.map(lambda value: math.isfinite(value) and value > 0))
+    dates = pd.to_datetime(frame[date_col], errors="coerce")
+    series = pd.Series(close.values, index=dates)
+    series = series[~series.index.isna()]
     return series[~series.index.duplicated(keep="last")].sort_index().dropna()
 
 
 def fetch_style_closes(calendar_days: int = LOOKBACK_CALENDAR) -> dict[str, pd.Series]:
-    start = (date.today() - timedelta(days=calendar_days)).strftime("%Y-%m-%d")
+    start = recent_date(calendar_days)
     out: dict[str, pd.Series] = {}
     for key, code, _name in INDEX_META:
         try:
@@ -336,5 +356,16 @@ def analyze(days: Optional[int] = None) -> dict[str, Any]:
     state, reasons = classify_style(feat)
     frame = feat.get("frame")
     trend = build_trend_rows(frame, n) if isinstance(frame, pd.DataFrame) else []
+    as_of = (
+        frame.index[-1].strftime("%Y-%m-%d")
+        if isinstance(frame, pd.DataFrame) and not frame.empty
+        else None
+    )
     print_style_report(feat, state, reasons, trend)
-    return {"features": feat, "state": state, "reasons": reasons, "trend": trend}
+    return {
+        "as_of": as_of,
+        "features": feat,
+        "state": state,
+        "reasons": reasons,
+        "trend": trend,
+    }

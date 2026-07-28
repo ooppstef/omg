@@ -8,12 +8,14 @@ import math
 import os
 import threading
 from typing import Iterator, Optional
+from zoneinfo import ZoneInfo
 
 _DIRECT_HTTP_LOCK = threading.RLock()
 _DIRECT_HTTP_LOCAL = threading.local()
 _DIRECT_HTTP_USERS = 0
 _DIRECT_HTTP_ORIGINAL_REQUEST = None
 _DIRECT_HTTP_TIMEOUT_SECONDS = 15
+_MARKET_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def env_int(name: str, default: int) -> int:
@@ -28,11 +30,13 @@ def env_int(name: str, default: int) -> int:
 
 
 def recent_date(n: int) -> str:
-    today = datetime.date.today()
+    today = datetime.datetime.now(_MARKET_TZ).date()
     return (today - datetime.timedelta(days=n)).strftime("%Y-%m-%d")
 
 
 def finite_float(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -41,9 +45,8 @@ def finite_float(value) -> Optional[float]:
 
 
 def fmt_chg(chg) -> str:
-    if isinstance(chg, (int, float)) and chg == chg:
-        return f"{chg:+.2f}%"
-    return "-"
+    number = finite_float(chg)
+    return f"{number:+.2f}%" if number is not None else "-"
 
 
 @contextlib.contextmanager

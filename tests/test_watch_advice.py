@@ -33,6 +33,43 @@ def _fake_ohlcv(n: int = 80) -> pd.DataFrame:
 
 
 class TestWatchAdviceHelpers(unittest.TestCase):
+    def test_akshare_normalization_has_one_amount_column(self):
+        raw = pd.DataFrame(
+            {
+                "date": ["2026-07-21"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1e6],
+                "amount": [1e8],
+                "turnover": [1.0],
+            }
+        )
+
+        out = watch_advice._df_from_ak_daily(raw, "600000")
+
+        self.assertEqual(list(out.columns).count("amount"), 1)
+        self.assertEqual(float(out.iloc[-1]["amount"]), 1e8)
+
+    def test_akshare_normalization_rejects_invalid_ohlcv(self):
+        raw = pd.DataFrame(
+            {
+                "date": ["2026-07-21", "2026-07-22"],
+                "open": [10.0, 10.0],
+                "high": [9.5, 10.5],
+                "low": [9.8, 9.8],
+                "close": [10.2, 10.2],
+                "volume": [1e6, 1e6],
+                "amount": [1e8, 1e8],
+                "turnover": [1.0, 1.0],
+            }
+        )
+
+        out = watch_advice._df_from_ak_daily(raw, "600000")
+
+        self.assertEqual(out["trade_date"].tolist(), ["2026-07-22"])
+
     def test_tech_snapshot_has_core_fields(self):
         snap = watch_advice._tech_snapshot(_fake_ohlcv())
         self.assertIn("close", snap)
@@ -52,6 +89,14 @@ class TestWatchAdviceHelpers(unittest.TestCase):
         self.assertEqual(watch_advice._vol_stance(1.0), "量能大致持平")
         self.assertEqual(watch_advice._vol_stance(0.5), "量能偏弱")
         self.assertIsNone(watch_advice._vol_stance(None))
+        self.assertIsNone(watch_advice._vol_stance(float("inf")))
+
+    def test_hot_score_map_rejects_nonfinite_scores(self):
+        scores = watch_advice._build_hot_score_map(
+            {"2026-07-21": [("有效", 1.0), ("无效", float("inf"))]}
+        )
+
+        self.assertEqual(scores, {"有效": 1.0})
 
     def test_fetch_tech_prefers_akshare(self):
         fake = _fake_ohlcv(80)
@@ -183,7 +228,11 @@ class TestWatchAdviceAnalyze(unittest.TestCase):
     def test_analyze_injected_skip_board(self):
         watch = [
             SimpleNamespace(
-                code="600000", name="浦发银行", price=10.0, change_percent=1.2
+                code="600000",
+                name="浦发银行",
+                price=10.0,
+                change_percent=1.2,
+                as_of="2026-07-21",
             )
         ]
         tech = {
@@ -210,6 +259,33 @@ class TestWatchAdviceAnalyze(unittest.TestCase):
         self.assertEqual(item["tech"]["close"], 10.0)
         self.assertIsNone(item["board"])
         self.assertTrue(out["meta"]["skip_board"])
+        self.assertEqual(item["quote_as_of"], "2026-07-21")
+        self.assertEqual(out["as_of"], "2026-07-21")
+        self.assertEqual(out["as_of_dates"], ["2026-07-21"])
+        self.assertIn("observed_at", out)
+
+    def test_analyze_marks_mixed_source_dates(self):
+        watch = [
+            SimpleNamespace(
+                code="600000",
+                name="浦发银行",
+                price=10.0,
+                change_percent=1.2,
+                as_of="2026-07-22",
+            )
+        ]
+
+        out = watch_advice.analyze(
+            skip_board=True,
+            watch_rows=watch,
+            index_rows=[],
+            industry_by_code={"600000": "银行"},
+            concepts_by_code={"600000": []},
+            tech_by_code={"600000": {"as_of": "2026-07-21", "close": 10.0}},
+        )
+
+        self.assertIsNone(out["as_of"])
+        self.assertEqual(out["as_of_dates"], ["2026-07-21", "2026-07-22"])
 
     def test_analyze_with_board_alignment(self):
         watch = [
