@@ -505,7 +505,7 @@ def schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "etf",
-                "description": "主题 ETF 价量特征的启发式短/中线状态（非收益预测）",
+                "description": "主题 ETF 短/中线状态 + 量比 + 当日 session_path（高开低走/冲高回落等；非收益预测）",
                 "parameters": {"type": "object", "properties": {}},
             },
         },

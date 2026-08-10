@@ -37,7 +37,7 @@ DEFAULT_TOP_PER_STATE = 8
 DEFAULT_WORKERS = 12
 
 _UNIVERSE_PATH = Path(__file__).resolve().parent / "etf_universe.csv"
-_EMPTY_COLS = ["trade_date", "close", "amount", "change_pct"]
+_EMPTY_COLS = ["trade_date", "open", "high", "low", "close", "amount", "change_pct"]
 _EM_SESSION: Optional[requests.Session] = None
 _EM_SESSION_LOCK = threading.Lock()
 CHANGE_SOURCE_ADATA = "adata"
@@ -520,6 +520,12 @@ def build_comment(row: dict) -> str:
         chg = row.get("change_pct")
         if finite_float(chg) is not None:
             text += f"；{_change_label(row)}{fmt_chg(chg)}"
+        session_path = row.get("session_path") or {}
+        path = session_path.get("path_label")
+        if path:
+            text += f"；日内{path}"
+        elif session_path.get("path_status") in ("ohl_missing", "ohl_inconsistent"):
+            text += f"；日内路径缺口({session_path['path_status']})"
         return text
     return "数据不足，暂无点评"
 
@@ -535,6 +541,17 @@ def build_reason_block(row: dict) -> str:
     chg = row.get("change_pct")
     if finite_float(chg) is not None:
         lines.append(f"{_change_label(row)}: {fmt_chg(chg)}")
+    path = row.get("session_path") or {}
+    label = path.get("path_label")
+    if label:
+        bits = [f"日内路径: {label}"]
+        if path.get("open_pct") is not None:
+            bits.append(f"开盘{path['open_pct']:+.2f}%")
+        if path.get("close_vs_open") is not None:
+            bits.append(f"较开盘{path['close_vs_open']:+.2f}%")
+        lines.append("，".join(bits))
+    elif path.get("path_status") in ("ohl_missing", "ohl_inconsistent"):
+        lines.append(f"日内路径: 数据缺口({path['path_status']})")
     return "\n".join(f"   {x}" for x in lines) if lines else "   理由: 暂无"
 
 
@@ -604,6 +621,70 @@ def _scale_em_price(raw, prev_close: Optional[float] = None) -> Optional[float]:
     return None
 
 
+def session_path_from_bar(
+    *,
+    open_: Optional[float],
+    high: Optional[float],
+    low: Optional[float],
+    close: Optional[float],
+    prev_close: Optional[float],
+) -> dict:
+    """
+    用当日 OHLC 相对昨收刻画日内路径（高开低走/冲高回落等）。
+    不替代完整分时；缺 OHL 时 path_status=ohl_missing。
+    """
+    empty = {
+        "open_pct": None,
+        "close_vs_open": None,
+        "upper_wick_pct": None,
+        "lower_wick_pct": None,
+        "path_label": None,
+        "path_status": "ohl_missing",
+    }
+    o = finite_float(open_)
+    h = finite_float(high)
+    lo = finite_float(low)
+    c = finite_float(close)
+    prev = finite_float(prev_close)
+    if o is None or h is None or lo is None or c is None or prev is None or prev <= 0:
+        return empty
+    if o <= 0 or h <= 0 or lo <= 0 or c <= 0:
+        return empty
+    # 轻度脏数据容忍：高低与开收矛盾时仍算，但标签降为缺口
+    if h < max(o, c) or lo > min(o, c):
+        return {**empty, "path_status": "ohl_inconsistent"}
+
+    open_pct = round((o / prev - 1.0) * 100, 2)
+    close_vs_open = round((c / o - 1.0) * 100, 2)
+    upper_wick_pct = round((h - max(o, c)) / prev * 100, 2)
+    lower_wick_pct = round((min(o, c) - lo) / prev * 100, 2)
+    off_high_pct = round((h - c) / prev * 100, 2)
+    off_low_pct = round((c - lo) / prev * 100, 2)
+
+    label = "震荡"
+    if open_pct >= 1.0 and close_vs_open <= -1.0:
+        label = "高开低走"
+    elif open_pct <= -1.0 and close_vs_open >= 1.0:
+        label = "低开高走"
+    elif upper_wick_pct >= 1.0 and off_high_pct >= 1.0:
+        label = "冲高回落"
+    elif lower_wick_pct >= 1.0 and off_low_pct >= 1.0:
+        label = "探底回升"
+    elif off_high_pct <= 0.35 and (c / prev - 1.0) * 100 >= 0.5:
+        label = "收在高位"
+    elif off_low_pct <= 0.35 and (c / prev - 1.0) * 100 <= -0.5:
+        label = "收在低位"
+
+    return {
+        "open_pct": open_pct,
+        "close_vs_open": close_vs_open,
+        "upper_wick_pct": upper_wick_pct,
+        "lower_wick_pct": lower_wick_pct,
+        "path_label": label,
+        "path_status": "ok",
+    }
+
+
 def fetch_etf_spot_em(
     fund_code: str, prev_close: Optional[float] = None
 ) -> Optional[dict]:
@@ -611,7 +692,8 @@ def fetch_etf_spot_em(
     url = "https://push2delay.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": _etf_secid(fund_code),
-        "fields": "f43,f47,f48,f57,f58,f60,f86,f169,f170",
+        # f43最新 f44最高 f45最低 f46今开 f47量 f48额 f57码 f58名 f60昨收 f86时间 f170涨跌幅
+        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f86,f169,f170",
     }
     try:
         r = _em_session().get(url, params=params, timeout=10)
@@ -626,6 +708,9 @@ def fetch_etf_spot_em(
     if prev_close is not None and prev_close > 0:
         if abs(close - prev_close) / prev_close > _SPOT_MAX_DEV:
             return None
+    open_ = _scale_em_price(data.get("f46"), prev_close)
+    high = _scale_em_price(data.get("f44"), prev_close)
+    low = _scale_em_price(data.get("f45"), prev_close)
     chg = finite_float(data.get("f170"))
     change_pct = chg / 100.0 if chg is not None else None
     amount = finite_float(data.get("f48"))
@@ -644,7 +729,11 @@ def fetch_etf_spot_em(
     return {
         "code": str(data.get("f57") or fund_code),
         "name": str(data.get("f58") or ""),
+        "open": open_,
+        "high": high,
+        "low": low,
         "close": close,
+        "prev_close": _scale_em_price(data.get("f60"), prev_close),
         "change_pct": change_pct,
         "amount": amount,
         "trade_date": trade_date,
@@ -661,6 +750,11 @@ def _normalize_etf_frame(df: Optional[pd.DataFrame], start_date: str) -> pd.Data
             return empty
         parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
         out["close"] = pd.to_numeric(out["close"], errors="coerce")
+        for col in ("open", "high", "low"):
+            if col in out.columns:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+            else:
+                out[col] = pd.NA
         out["amount"] = (
             pd.to_numeric(out["amount"], errors="coerce")
             if "amount" in out.columns
@@ -677,6 +771,8 @@ def _normalize_etf_frame(df: Optional[pd.DataFrame], start_date: str) -> pd.Data
             return empty
         out["trade_date"] = parsed_dates.loc[valid].dt.strftime("%Y-%m-%d")
         out["amount"] = out["amount"].where(out["amount"] > 0)
+        for col in ("open", "high", "low"):
+            out[col] = out[col].where(out[col] > 0)
         out = out.drop_duplicates(subset=["trade_date"], keep="last")
         out = out.loc[out["trade_date"] >= start_date]
         cols = [c for c in _EMPTY_COLS if c in out.columns]
@@ -736,6 +832,10 @@ def _is_partial_spot_day(
     )
 
 
+def _bar_missing_ohl(row) -> bool:
+    return any(finite_float(row.get(col)) is None for col in ("open", "high", "low"))
+
+
 def ensure_etf_as_of(
     frame: pd.DataFrame,
     fund_code: str,
@@ -743,8 +843,8 @@ def ensure_etf_as_of(
 ) -> tuple[pd.DataFrame, dict]:
     """
     先裁掉目标日之后的数据；若最后一根 K 线仍早于目标日，
-    仅用同日东财快照补齐。
-    返回 (frame, meta)：as_of / change_source / patched。
+    仅用同日东财快照补齐。目标日已有 K 线但缺 OHL 时，只回填开高低。
+    返回 (frame, meta)：as_of / change_source / patched / ohl_patched。
     """
     if frame is not None and not frame.empty:
         dates = frame["trade_date"].astype(str).str[:10]
@@ -759,6 +859,7 @@ def ensure_etf_as_of(
         "as_of": frame_last_date(frame),
         "change_source": CHANGE_SOURCE_ADATA,
         "patched": False,
+        "ohl_patched": False,
         "volume_status": (
             "historical"
             if historical_amount is not None and historical_amount > 0
@@ -769,11 +870,46 @@ def ensure_etf_as_of(
         return frame if frame is not None else pd.DataFrame(columns=_EMPTY_COLS), meta
 
     last = meta["as_of"]
-    if last is None or last >= target_as_of:
-        if last == target_as_of and _is_partial_spot_day(target_as_of):
-            frame = frame.copy()
+    if last is None or last > target_as_of:
+        return frame, meta
+
+    if last == target_as_of:
+        frame = frame.copy()
+        if _is_partial_spot_day(target_as_of):
             frame.loc[frame.index[-1], "amount"] = pd.NA
             meta["volume_status"] = "partial_session"
+        if not _bar_missing_ohl(frame.iloc[-1]):
+            return frame, meta
+        # 目标日已有收盘行但缺 OHL：用东财快照只补开高低
+        prev_close = (
+            finite_float(frame.iloc[-2].get("close"))
+            if len(frame) >= 2
+            else None
+        )
+        spot = fetch_etf_spot_em(fund_code, prev_close=prev_close)
+        if (
+            not spot
+            or spot.get("trade_date") != target_as_of
+        ):
+            return frame, meta
+        # 只允许把同一时点的 OHL 与现有收盘价组合；否则会拼出不存在的 K 线。
+        row_close = finite_float(frame.iloc[-1].get("close"))
+        spot_close = finite_float(spot.get("close"))
+        if (
+            row_close is None
+            or spot_close is None
+            or not math.isclose(row_close, spot_close, rel_tol=1e-6, abs_tol=5e-4)
+        ):
+            return frame, meta
+        filled = False
+        for col in ("open", "high", "low"):
+            if finite_float(frame.iloc[-1].get(col)) is None:
+                val = finite_float(spot.get(col))
+                if val is not None and val > 0:
+                    frame.loc[frame.index[-1], col] = val
+                    filled = True
+        if filled:
+            meta["ohl_patched"] = True
         return frame, meta
 
     prev_close = finite_float(frame.iloc[-1].get("close"))
@@ -807,6 +943,9 @@ def ensure_etf_as_of(
 
     patch = {
         "trade_date": target_as_of,
+        "open": finite_float(spot.get("open")),
+        "high": finite_float(spot.get("high")),
+        "low": finite_float(spot.get("low")),
         "close": close,
         "amount": amount,
         "change_pct": change_pct,
@@ -882,8 +1021,10 @@ def analyze_one(
         "target_as_of": target_as_of,
         "change_source": CHANGE_SOURCE_ADATA,
         "patched": False,
+        "ohl_patched": False,
         "volume_status": "historical",
         "features": {},
+        "session_path": {},
         "comment": "行情不足",
     }
     frame = fetch_etf_frame(code, start_date)
@@ -895,6 +1036,7 @@ def analyze_one(
         row["as_of"] = asof_meta.get("as_of")
         row["change_source"] = asof_meta.get("change_source") or CHANGE_SOURCE_ADATA
         row["patched"] = bool(asof_meta.get("patched"))
+        row["ohl_patched"] = bool(asof_meta.get("ohl_patched"))
         row["volume_status"] = asof_meta.get("volume_status") or "missing"
     else:
         row["as_of"] = frame_last_date(frame)
@@ -907,6 +1049,17 @@ def analyze_one(
 
     close, amount = _frame_ohlc_series(frame)
     result = classify_etf(close, amount, bench_close)
+    last = frame.iloc[-1]
+    prev_close = None
+    if len(frame) >= 2:
+        prev_close = finite_float(frame.iloc[-2].get("close"))
+    session_path = session_path_from_bar(
+        open_=finite_float(last.get("open")),
+        high=finite_float(last.get("high")),
+        low=finite_float(last.get("low")),
+        close=finite_float(last.get("close")),
+        prev_close=prev_close,
+    )
     row.update(
         {
             "available": result["available"],
@@ -914,8 +1067,9 @@ def analyze_one(
             "mid_state": result["mid_state"],
             "short_reasons": result.get("short_reasons") or [],
             "mid_reasons": result.get("mid_reasons") or [],
-            "change_pct": _parse_change_pct(frame.iloc[-1].get("change_pct")),
+            "change_pct": _parse_change_pct(last.get("change_pct")),
             "features": result["features"],
+            "session_path": session_path,
         }
     )
     row["comment"] = build_comment(row)
@@ -977,6 +1131,8 @@ def scan_etf_states(
         target_as_of = bench_as_of
     elif bench_meta.get("patched"):
         print(f"宽基缺原目标日，已用东财实时补齐")
+    elif bench_meta.get("ohl_patched"):
+        print("宽基目标日 OHL 缺失，已用东财快照回填")
     print(f"对齐目标交易日 {target_as_of}")
 
     bench_close = _prep_series(_frame_ohlc_series(bench_frame)[0])
@@ -1004,13 +1160,15 @@ def scan_etf_states(
 
     available = [r for r in rows if r.get("available")]
     patched = sum(1 for r in available if r.get("patched"))
+    ohl_patched = sum(1 for r in available if r.get("ohl_patched"))
     stale = sum(
         1
         for r in available
         if r.get("as_of") and r.get("target_as_of") and r["as_of"] < r["target_as_of"]
     )
     print(
-        f"有效样本 {len(available)}/{len(rows)}；东财实时补齐 {patched}；仍滞后 {stale}"
+        f"有效样本 {len(available)}/{len(rows)}；东财实时补齐 {patched}；"
+        f"OHL 回填 {ohl_patched}；仍滞后 {stale}"
     )
     if for_report:
         return select_for_report(available, top_per_state=top_per_state)

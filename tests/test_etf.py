@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from stocks.etf import (
+    CHANGE_SOURCE_ADATA,
     CHANGE_SOURCE_EM_SPOT,
     STATE_DOWN,
     STATE_START,
@@ -21,7 +22,9 @@ from stocks.etf import (
     fetch_etf_spot_em,
     load_universe,
     resolve_target_as_of,
+    session_path_from_bar,
 )
+from stocks.util import finite_float
 
 
 def _series(values, start="2024-01-01"):
@@ -481,6 +484,219 @@ class TestFeaturesAndState(unittest.TestCase):
         df = pd.DataFrame({"trade_date": ["2026-07-21"], "open": [1.0]})
         out = _normalize_etf_frame(df, "2026-01-01")
         self.assertTrue(out.empty)
+
+    def test_normalize_keeps_open_high_low(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-07",
+                    "open": 1.0,
+                    "high": 1.02,
+                    "low": 0.99,
+                    "close": 1.01,
+                    "amount": 1e8,
+                    "change_pct": 1.0,
+                },
+                {
+                    "trade_date": "2026-08-10",
+                    "open": 1.05,
+                    "high": 1.08,
+                    "low": 1.02,
+                    "close": 1.03,
+                    "amount": 1.2e8,
+                    "change_pct": 2.0,
+                },
+            ]
+        )
+        out = _normalize_etf_frame(raw, "2026-01-01")
+        self.assertEqual(list(out.columns), [
+            "trade_date", "open", "high", "low", "close", "amount", "change_pct"
+        ])
+        self.assertAlmostEqual(float(out.iloc[-1]["open"]), 1.05)
+        self.assertAlmostEqual(float(out.iloc[-1]["high"]), 1.08)
+
+
+class TestSessionPath(unittest.TestCase):
+    def test_gaokai_dizou(self):
+        path = session_path_from_bar(
+            open_=1.05, high=1.06, low=1.00, close=1.01, prev_close=1.00
+        )
+        self.assertAlmostEqual(path["open_pct"], 5.0)
+        self.assertLess(path["close_vs_open"], -1.0)
+        self.assertEqual(path["path_label"], "高开低走")
+
+    def test_chonggao_huiluo(self):
+        path = session_path_from_bar(
+            open_=1.01, high=1.06, low=1.00, close=1.02, prev_close=1.00
+        )
+        self.assertEqual(path["path_label"], "冲高回落")
+        self.assertGreater(path["upper_wick_pct"], 1.0)
+
+    def test_dikai_gaozou(self):
+        path = session_path_from_bar(
+            open_=0.97, high=1.03, low=0.96, close=1.02, prev_close=1.00
+        )
+        self.assertEqual(path["path_label"], "低开高走")
+
+    def test_missing_ohl_returns_gap(self):
+        path = session_path_from_bar(
+            open_=None, high=None, low=None, close=1.02, prev_close=1.00
+        )
+        self.assertIsNone(path["path_label"])
+        self.assertEqual(path["path_status"], "ohl_missing")
+        block = build_reason_block(
+            {
+                "short_reasons": ["短线震荡"],
+                "mid_reasons": [],
+                "session_path": path,
+            }
+        )
+        self.assertIn("日内路径: 数据缺口(ohl_missing)", block)
+
+    def test_neutral_path_comment_has_single_intraday_prefix(self):
+        path = session_path_from_bar(
+            open_=1.0, high=1.003, low=0.997, close=1.0, prev_close=1.0
+        )
+        self.assertEqual(path["path_label"], "震荡")
+        comment = build_comment(
+            {
+                "short_reasons": ["短线震荡"],
+                "mid_reasons": [],
+                "session_path": path,
+            }
+        )
+        self.assertIn("日内震荡", comment)
+        self.assertNotIn("日内日内", comment)
+
+    @patch("stocks.etf.fetch_etf_spot_em")
+    def test_ensure_as_of_full_patch_keeps_spot_ohl(self, mock_spot):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-07",
+                    "open": 1.0,
+                    "high": 1.02,
+                    "low": 0.99,
+                    "close": 1.0,
+                    "amount": 1e8,
+                    "change_pct": 0.0,
+                }
+            ]
+        )
+        mock_spot.return_value = {
+            "code": "512010",
+            "name": "医药",
+            "open": 1.03,
+            "high": 1.08,
+            "low": 1.01,
+            "close": 1.04,
+            "change_pct": 4.0,
+            "amount": 2e8,
+            "trade_date": "2026-08-10",
+        }
+        out, meta = ensure_etf_as_of(frame, "512010", "2026-08-10")
+        self.assertTrue(meta["patched"])
+        self.assertFalse(meta["ohl_patched"])
+        self.assertEqual(meta["change_source"], CHANGE_SOURCE_EM_SPOT)
+        last = out.iloc[-1]
+        self.assertAlmostEqual(float(last["open"]), 1.03)
+        self.assertAlmostEqual(float(last["high"]), 1.08)
+        path = session_path_from_bar(
+            open_=finite_float(last["open"]),
+            high=finite_float(last["high"]),
+            low=finite_float(last["low"]),
+            close=finite_float(last["close"]),
+            prev_close=1.0,
+        )
+        self.assertIsNotNone(path["path_label"])
+
+    @patch("stocks.etf.fetch_etf_spot_em")
+    def test_ensure_as_of_backfills_ohl_when_same_day_missing(self, mock_spot):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-07",
+                    "open": 1.0,
+                    "high": 1.02,
+                    "low": 0.99,
+                    "close": 1.0,
+                    "amount": 1e8,
+                    "change_pct": 0.0,
+                },
+                {
+                    "trade_date": "2026-08-10",
+                    "open": float("nan"),
+                    "high": float("nan"),
+                    "low": float("nan"),
+                    "close": 1.04,
+                    "amount": 2e8,
+                    "change_pct": 4.0,
+                },
+            ]
+        )
+        mock_spot.return_value = {
+            "code": "512010",
+            "name": "医药",
+            "open": 1.03,
+            "high": 1.08,
+            "low": 1.01,
+            "close": 1.04,
+            "change_pct": 4.0,
+            "amount": 2e8,
+            "trade_date": "2026-08-10",
+        }
+        out, meta = ensure_etf_as_of(frame, "512010", "2026-08-10")
+        self.assertFalse(meta["patched"])
+        self.assertTrue(meta["ohl_patched"])
+        self.assertEqual(meta["change_source"], CHANGE_SOURCE_ADATA)
+        last = out.iloc[-1]
+        self.assertAlmostEqual(float(last["close"]), 1.04)
+        self.assertAlmostEqual(float(last["open"]), 1.03)
+        self.assertAlmostEqual(float(last["high"]), 1.08)
+        self.assertAlmostEqual(float(last["low"]), 1.01)
+        mock_spot.assert_called_once()
+
+    @patch("stocks.etf.fetch_etf_spot_em")
+    def test_ensure_as_of_rejects_ohl_from_mismatched_snapshot(self, mock_spot):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-08-07",
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "amount": 1e8,
+                    "change_pct": 0.0,
+                },
+                {
+                    "trade_date": "2026-08-10",
+                    "open": float("nan"),
+                    "high": float("nan"),
+                    "low": float("nan"),
+                    "close": 1.01,
+                    "amount": 2e8,
+                    "change_pct": 1.0,
+                },
+            ]
+        )
+        mock_spot.return_value = {
+            "open": 1.03,
+            "high": 1.08,
+            "low": 1.00,
+            "close": 1.07,
+            "change_pct": 7.0,
+            "amount": 3e8,
+            "trade_date": "2026-08-10",
+        }
+
+        out, meta = ensure_etf_as_of(frame, "512010", "2026-08-10")
+
+        self.assertFalse(meta["patched"])
+        self.assertFalse(meta["ohl_patched"])
+        self.assertEqual(meta["change_source"], CHANGE_SOURCE_ADATA)
+        self.assertTrue(pd.isna(out.iloc[-1]["open"]))
+        self.assertAlmostEqual(float(out.iloc[-1]["close"]), 1.01)
 
 
 if __name__ == "__main__":

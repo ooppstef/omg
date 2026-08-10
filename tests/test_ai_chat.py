@@ -729,6 +729,8 @@ class TestSkills(unittest.TestCase):
         self.assertIn("量价必写", skill["body"])
         self.assertIn("vol_stance", skill["body"])
         self.assertIn("有量价", skill["body"])
+        self.assertIn("session_path", skill["body"])
+        self.assertIn("高开低走", skill["body"])
         self.assertIn("## 明日观察推荐", skill["body"])
         self.assertIn("严格 <5", skill["body"])
         self.assertIn("0～4", skill["body"])
