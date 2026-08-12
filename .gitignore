@@ -21,3 +21,6 @@ stocks/my_list.txt
 stocks/filter/__pycache__
 stocks/stocks.db
 stocks/stocks.last_check
+
+# 本地工具产物
+.omo/
