@@ -14,6 +14,7 @@ import adata
 import pandas as pd
 import requests
 
+from stocks.quote import clean_numeric, parse_date_series
 from stocks.util import env_int, finite_float, fmt_chg, recent_date
 
 BENCH_CODE = "510300"
@@ -46,7 +47,9 @@ CHANGE_SOURCE_EM_SPOT = "eastmoney_spot"
 _SPOT_MAX_DEV = 0.25
 _TZ = ZoneInfo("Asia/Shanghai")
 
-# 短线 / 中线阈值（同一套判定流水线）
+# 短线 / 中线阈值（同一套判定流水线）。
+# 经验规则 v1：调整阈值需同步更新测试与文档并升版本号。
+_HORIZON_CFG_VERSION = 1
 _HORIZON_CFG = {
     HORIZON_SHORT: {
         "ret_key": "ret_10",
@@ -121,8 +124,8 @@ def history_start_date(calendar_days: int = LOOKBACK_CALENDAR_DAYS) -> str:
 
 
 def _prep_series(s: pd.Series) -> pd.Series:
-    out = pd.to_numeric(s, errors="coerce")
-    out.index = pd.to_datetime(out.index, errors="coerce")
+    out = clean_numeric(s)
+    out.index = parse_date_series(out.index)
     out = out[~out.index.isna()]
     return out[~out.index.duplicated(keep="last")].sort_index()
 
@@ -595,7 +598,12 @@ def _etf_secid(fund_code: str) -> str:
 
 
 def _scale_em_price(raw, prev_close: Optional[float] = None) -> Optional[float]:
-    """东财 ETF 报价常见为价格×1000；用昨收对齐。无法校验或离谱时返回 None。"""
+    """东财 ETF 报价常见为价格×1000；用昨收对齐。无法校验或离谱时返回 None。
+
+    无昨收分支依赖「东财恒为 ×1000」假设且只收第一个候选量纲——这是脆弱假设；
+    但当前实际调用路径（resolve_target_as_of / ensure_etf_as_of）都会传入 prev_close，
+    该分支极少触发，仅在极端缺昨收时兜底，不做多候选启发式以免引入误判。
+    """
     if raw is None:
         return None
     try:
@@ -748,20 +756,20 @@ def _normalize_etf_frame(df: Optional[pd.DataFrame], start_date: str) -> pd.Data
         out = df.copy()
         if "trade_date" not in out.columns or "close" not in out.columns:
             return empty
-        parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
-        out["close"] = pd.to_numeric(out["close"], errors="coerce")
+        parsed_dates = parse_date_series(out["trade_date"])
+        out["close"] = clean_numeric(out["close"])
         for col in ("open", "high", "low"):
             if col in out.columns:
-                out[col] = pd.to_numeric(out[col], errors="coerce")
+                out[col] = clean_numeric(out[col])
             else:
                 out[col] = pd.NA
         out["amount"] = (
-            pd.to_numeric(out["amount"], errors="coerce")
+            clean_numeric(out["amount"])
             if "amount" in out.columns
             else pd.NA
         )
         if "change_pct" in out.columns:
-            out["change_pct"] = pd.to_numeric(out["change_pct"], errors="coerce")
+            out["change_pct"] = clean_numeric(out["change_pct"])
         else:
             out["change_pct"] = pd.NA
         out = out.replace([math.inf, -math.inf], pd.NA)

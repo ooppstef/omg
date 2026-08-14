@@ -31,6 +31,41 @@ STATES = (
 DEFAULT_DAYS = 8
 _TZ = ZoneInfo("Asia/Shanghai")
 
+# 情绪阶段判定的经验阈值（v1；调整阈值需同步更新测试与文档，并升版本号）
+_MOOD_RULES = {
+    "version": 1,
+    # 退潮：亏钱效应主导
+    "ebb_limit_down_min": 30,      # 跌停 ≥30
+    "ebb_limit_up_max": 30,        # 涨停 <30 且炸板率高
+    "ebb_high_zhaban_rate": 0.50,  # 炸板率 >50%
+    "ebb_premium_min": -5.0,       # 昨涨停今日均溢价 ≤-5%
+    # 冰点：涨停稀少
+    "ice_limit_up_max": 30,
+    # 分歧：承接犹豫
+    "diverge_high_up": 60,         # 涨停 ≥60 但高度 <5 且跌停 ≥15
+    "diverge_high_height": 5,
+    "diverge_high_down": 15,
+    "diverge_mid_down_low": 10,    # 10 ≤ 跌停 <30 且高度 ≥3 且涨停 <60
+    "diverge_mid_down_high": 30,
+    "diverge_mid_height": 3,
+    "diverge_mid_up": 60,
+    "diverge_rate_up": 30,         # 涨停 ≥30 且炸板率在 30%..50%
+    "diverge_rate_low": 0.30,
+    "diverge_rate_high": 0.50,
+    # 主升：赚钱效应全面
+    "main_up_min": 60,
+    "main_height_min": 5,
+    "main_zhaban_rate_max": 0.30,
+    "main_down_max": 10,
+    # 修复：升温但未高潮
+    "repair_up_low": 30,
+    "repair_up_high": 60,
+    "repair_down_max": 10,
+    "repair_rate_max": 0.35,
+    "repair_height_low": 2,
+    "repair_height_high": 4,
+}
+
 
 def zhaban_rate(limit_up: int, zhaban: int) -> float:
     denom = limit_up + zhaban
@@ -150,21 +185,24 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
         )
         return lines
 
+    r = _MOOD_RULES
     # 1) 退潮：亏钱效应主导
-    if down >= 30 or (up < 30 and rate > 0.50) or (
-        premium is not None and premium <= -5.0
+    if (
+        down >= r["ebb_limit_down_min"]
+        or (up < r["ebb_limit_up_max"] and rate > r["ebb_high_zhaban_rate"])
+        or (premium is not None and premium <= r["ebb_premium_min"])
     ):
         why = ["退潮：亏钱效应显著"]
-        if down >= 30:
+        if down >= r["ebb_limit_down_min"]:
             why.append(f"跌停偏多({down}家)")
-        if up < 30 and rate > 0.50:
+        if up < r["ebb_limit_up_max"] and rate > r["ebb_high_zhaban_rate"]:
             why.append(f"涨停偏少({up})且炸板率高({rate * 100:.0f}%)")
-        if premium is not None and premium <= -5.0:
+        if premium is not None and premium <= r["ebb_premium_min"]:
             why.append(f"昨涨停溢价极差({premium:+.1f}%)")
         return STATE_EBB, why + base_why()[:3]
 
     # 2) 冰点：涨停稀少（须在「仅炸板率分歧」之前，避免冷市被标分歧）
-    if up < 30:
+    if up < r["ice_limit_up_max"]:
         why = [
             "冰点：涨停稀少，进攻意愿弱",
             (
@@ -178,12 +216,21 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
 
     # 3) 分歧：承接犹豫（炸板率分歧仅在涨停已达一定热度时启用）
     high_up_weak_height = (
-        height is not None and up >= 60 and height < 5 and down >= 15
+        height is not None
+        and up >= r["diverge_high_up"]
+        and height < r["diverge_high_height"]
+        and down >= r["diverge_high_down"]
     )
     mid_diverge = (
-        height is not None and 10 <= down < 30 and height >= 3 and up < 60
+        height is not None
+        and r["diverge_mid_down_low"] <= down < r["diverge_mid_down_high"]
+        and height >= r["diverge_mid_height"]
+        and up < r["diverge_mid_up"]
     )
-    rate_diverge = up >= 30 and 0.30 <= rate <= 0.50
+    rate_diverge = (
+        up >= r["diverge_rate_up"]
+        and r["diverge_rate_low"] <= rate <= r["diverge_rate_high"]
+    )
     if rate_diverge or mid_diverge or high_up_weak_height:
         why = ["分歧：资金承接犹豫"]
         if rate_diverge:
@@ -197,10 +244,10 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
     # 4) 主升：赚钱效应全面
     if (
         height is not None
-        and up >= 60
-        and height >= 5
-        and rate < 0.30
-        and down < 10
+        and up >= r["main_up_min"]
+        and height >= r["main_height_min"]
+        and rate < r["main_zhaban_rate_max"]
+        and down < r["main_down_max"]
     ):
         why = [
             "主升：涨停多、高度够、炸板低、跌停少",
@@ -213,10 +260,10 @@ def classify_mood(metrics: dict[str, Any]) -> tuple[str, list[str]]:
     # 5) 修复：升温但未高潮
     if (
         height is not None
-        and 30 <= up <= 60
-        and down < 10
-        and rate < 0.35
-        and 2 <= height <= 4
+        and r["repair_up_low"] <= up <= r["repair_up_high"]
+        and down < r["repair_down_max"]
+        and rate < r["repair_rate_max"]
+        and r["repair_height_low"] <= height <= r["repair_height_high"]
     ):
         why = [
             "修复：情绪回暖但未到高潮",

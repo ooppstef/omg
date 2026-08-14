@@ -617,6 +617,18 @@ class TestChatLoop(unittest.TestCase):
         with patch("builtins.input", side_effect=EOFError):
             self.assertEqual(ai_chat.run(prompt="q"), 1)
 
+    @patch(
+        "stocks.ai.chat.ask_once",
+        side_effect=[RuntimeError("network"), "done"],
+    )
+    @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
+    def test_prompt_failure_can_retry_without_retyping(self, _client, ask):
+        with patch("builtins.input", side_effect=["retry", "quit"]):
+            self.assertEqual(ai_chat.run(prompt="一段很长的原始问题"), 0)
+        self.assertEqual(ask.call_count, 2)
+        retried_messages = ask.call_args_list[1].args[2]
+        self.assertEqual(retried_messages[-1]["content"], "一段很长的原始问题")
+
     @patch("stocks.ai.chat.ask_once", side_effect=KeyboardInterrupt)
     @patch("stocks.ai.chat.llm_client", return_value=(MagicMock(), "demo"))
     def test_ctrl_c_during_request_exits_cleanly(self, _client, _ask):

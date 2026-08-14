@@ -503,5 +503,30 @@ class TestBatchFetch(unittest.TestCase):
             full.assert_called_once()
 
 
+class TestExchangePatch(unittest.TestCase):
+    def test_safe_exchange_patch_restores_both_adata_bindings_on_error(self):
+        import importlib
+
+        import adata.common.utils.code_utils as code_utils
+
+        stock_code = importlib.import_module("adata.stock.info.stock_code")
+
+        original_utils = code_utils.get_exchange_by_stock_code
+        original_stock_code = stock_code.get_exchange_by_stock_code
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            with db._safe_exchange_patch():
+                self.assertIsNot(
+                    code_utils.get_exchange_by_stock_code,
+                    original_utils,
+                )
+                self.assertEqual(code_utils.get_exchange_by_stock_code("810000"), "")
+                self.assertEqual(stock_code.get_exchange_by_stock_code("810000"), "")
+                raise RuntimeError("boom")
+
+        self.assertIs(code_utils.get_exchange_by_stock_code, original_utils)
+        self.assertIs(stock_code.get_exchange_by_stock_code, original_stock_code)
+
+
 if __name__ == "__main__":
     unittest.main()

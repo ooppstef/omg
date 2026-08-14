@@ -6,6 +6,7 @@ import contextlib
 import datetime
 import math
 import os
+import sys
 import threading
 from typing import Iterator, Optional
 from zoneinfo import ZoneInfo
@@ -44,6 +45,21 @@ def finite_float(value) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
+def supports_color(stream=None) -> bool:
+    """输出流是否支持 ANSI 颜色（tty 且未设置 NO_COLOR）。
+
+    管道/文件/日志重定向下返回 False，避免污染结构化输出；
+    tools 的 stdout 重定向（StringIO）也会自然走无色路径。
+    """
+    if "NO_COLOR" in os.environ:
+        return False
+    stream = stream if stream is not None else sys.stdout
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def fmt_chg(chg) -> str:
     number = finite_float(chg)
     return f"{number:+.2f}%" if number is not None else "-"
@@ -53,8 +69,14 @@ def fmt_chg(chg) -> str:
 def force_direct_http() -> Iterator[None]:
     """在当前线程内临时强制 requests 直连。
 
-    东财等站点经本地 Clash/系统代理时常出现 ProxyError；
-    crowd/etf 自建 Session 已设 trust_env=False，akshare 仍会读代理环境变量。
+    东财等站点经本地 Clash/系统代理时常出现 ProxyError。
+
+    职责边界（项目唯一的全局 requests patch）：
+    - 仅用于第三方库内部请求（adata/akshare 的 requests 无法参数级控制），
+      例如 mood 的东财涨停四池、watch_advice 的新浪日线。
+    - 自建 Session（crowd._session / etf._em_session / rank._em_spot_session）
+      一律 trust_env=False 直连，不需要也不应再包此 patch。
+    - 不要在自建 Session 的调用上再套本 contextmanager，双轨冗余。
 
     仅在 enter/exit 时持锁，并用线程本地深度区分需要直连的调用；这样并发抓取
     不会互相串行，也不会改写进程环境或影响其他线程的正常代理请求。

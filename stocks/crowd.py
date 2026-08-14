@@ -9,6 +9,8 @@ import adata
 import pandas as pd
 import requests
 
+from stocks import tags
+from stocks.quote import clean_numeric, parse_date_series
 from stocks.universe import A_SHARE_CODE_PREFIXES
 from stocks.util import env_int, finite_float, fmt_chg, recent_date
 
@@ -93,10 +95,8 @@ def crowding_from_shares(share: pd.Series, as_of=None) -> dict:
         return empty
 
     s = share.copy()
-    s.index = pd.to_datetime(s.index, errors="coerce")
-    s = pd.to_numeric(s, errors="coerce").replace(
-        [math.inf, -math.inf], pd.NA
-    )
+    s.index = parse_date_series(s.index)
+    s = clean_numeric(s)
     s = s[s.index.notna()]
     s = s.where(s.between(0, 1)).dropna()
     s = s.sort_index()
@@ -150,12 +150,13 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "trade_date" not in out.columns or "amount" not in out.columns:
         return pd.DataFrame(columns=["trade_date", "amount", "change_pct"])
-    parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
-    out["amount"] = pd.to_numeric(out["amount"], errors="coerce")
+    parsed_dates = parse_date_series(out["trade_date"])
+    out["amount"] = clean_numeric(out["amount"])
     if "change_pct" in out.columns:
-        out["change_pct"] = pd.to_numeric(out["change_pct"], errors="coerce")
+        out["change_pct"] = clean_numeric(out["change_pct"])
     else:
         out["change_pct"] = pd.NA
+    # 原实现为全帧 replace：amount/change_pct 之外（含 OHLC）的 inf 也一并清洗
     out = out.replace([math.inf, -math.inf], pd.NA).dropna(subset=["amount"])
     parsed_dates = parsed_dates.reindex(out.index)
     valid = parsed_dates.notna() & (out["amount"] >= 0)
@@ -277,37 +278,8 @@ def fetch_concept_amount(index_code: str, start_date: str) -> pd.Series:
 
 
 def _list_em_industries() -> dict:
-    """东财全部行业板块 name -> BK 代码。"""
-    out = {}
-    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
-    for pn in range(1, 12):
-        try:
-            r = _session().get(
-                url,
-                params={
-                    "pn": pn,
-                    "pz": 100,
-                    "po": 1,
-                    "np": 1,
-                    "fltt": 2,
-                    "invt": 2,
-                    "fid": "f12",
-                    "fs": "m:90+t:2",
-                    "fields": "f12,f14",
-                },
-                timeout=15,
-            )
-            diff = ((r.json() or {}).get("data") or {}).get("diff") or []
-        except Exception:
-            break
-        if not diff:
-            break
-        for row in diff:
-            name = str(row.get("f14") or "").strip()
-            code = str(row.get("f12") or "").strip().upper()
-            if name and code.startswith("BK"):
-                out[name] = code
-    return out
+    """东财全部行业板块 name -> BK 代码（转发 tags 缓存服务）。"""
+    return tags.em_industries()
 
 
 def _list_ths_industries() -> dict:
@@ -372,10 +344,10 @@ def list_industries() -> pd.DataFrame:
 
 
 def build_share_series(concept_amount: pd.Series, market_amount: pd.Series) -> pd.Series:
-    c = pd.to_numeric(concept_amount, errors="coerce")
-    m = pd.to_numeric(market_amount, errors="coerce")
-    c_dates = pd.to_datetime(c.index, errors="coerce")
-    m_dates = pd.to_datetime(m.index, errors="coerce")
+    c = clean_numeric(concept_amount)
+    m = clean_numeric(market_amount)
+    c_dates = parse_date_series(c.index)
+    m_dates = parse_date_series(m.index)
     c = c.loc[c_dates.notna()].copy()
     m = m.loc[m_dates.notna()].copy()
     c.index = c_dates[c_dates.notna()].strftime("%Y-%m-%d")
@@ -466,40 +438,8 @@ def rank_crowding_rows(rows: list, top: int = 15) -> list:
 
 
 def _fetch_em_constituents(bk_code: str) -> list:
-    """东财行业成分股 [(code, name), ...]。"""
-    code = str(bk_code).strip().upper()
-    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
-    rows = []
-    for pn in range(1, 20):
-        try:
-            r = _session().get(
-                url,
-                params={
-                    "pn": pn,
-                    "pz": 100,
-                    "po": 1,
-                    "np": 1,
-                    "fltt": 2,
-                    "invt": 2,
-                    "fid": "f3",
-                    "fs": f"b:{code}",
-                    "fields": "f12,f14",
-                },
-                timeout=12,
-            )
-            diff = ((r.json() or {}).get("data") or {}).get("diff") or []
-        except Exception:
-            break
-        if not diff:
-            break
-        for item in diff:
-            stock = str(item.get("f12") or "").strip()
-            name = str(item.get("f14") or "").strip()
-            if stock:
-                rows.append((stock, name))
-        if len(diff) < 100:
-            break
-    return rows
+    """东财行业成分 [(code, name), ...]（转发 tags 缓存服务）。"""
+    return tags.em_constituents(bk_code)
 
 
 def _fetch_concept_top_stocks(index_code: str, top_n: int = 3) -> list:

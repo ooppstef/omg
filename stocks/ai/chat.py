@@ -296,6 +296,7 @@ def run(
     print(f"omg chat（{mode}）{skill_tag} · Ctrl-C 退出 · model={model}")
 
     request_failed = False
+    failed_text: Optional[str] = None
     try:
         while True:
             if first is not None:
@@ -311,6 +312,9 @@ def run(
                 continue
             if user_text.lower() in ("exit", "quit"):
                 return 0
+            if failed_text is not None and user_text.lower() == "retry":
+                user_text = failed_text
+                print("（重试上一条输入）", flush=True)
 
             # 无 CLI 首问时：第一条用户输入再尝试自动挂 skill
             if loaded is None and not explicit_skill:
@@ -335,8 +339,14 @@ def run(
                     messages.pop()
                 if messages and messages[-1].get("role") == "user":
                     messages.pop()
+                failed_text = user_text
+                preview = " ".join(user_text.split())
+                if len(preview) > 120:
+                    preview = preview[:117] + "..."
+                print(f"（输入 retry 可重试；已撤销：{preview}）", flush=True)
                 request_failed = True
                 continue
+            failed_text = None
             request_failed = False
             print(f"助手> {answer}\n")
     except KeyboardInterrupt:

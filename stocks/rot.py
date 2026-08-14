@@ -15,6 +15,41 @@ RECENT_DAYS = 2
 WARM_DAYS = 3
 CONSTITUENT_COVERAGE_GATE = 0.80
 
+# 轮动评分权重与关键阈值（v1；经验值，调整需同步更新测试与文档并升版本号）。
+# 权重之和=1.0；gate 是回流分组的硬条件。
+_SCORING = {
+    "version": 1,
+    # _stock_score：成分宽度分（0..100）
+    "stock_avg_center": 2.0,  # top5 均值 -2% 起评，+3% 满分
+    "stock_avg_scale": 40.0,
+    "stock_pos_scale": 60.0,
+    # _heat_score：热榜分（0..100）
+    "heat_rank_span": 21.0,  # 第1名满分
+    "heat_rank_scale": 50.0,
+    "heat_value_scale": 50.0,
+    # pullback_score（回流优先）权重与 gate
+    "pullback_w_strong": 0.35,
+    "pullback_w_recent": 0.25,
+    "pullback_w_stock": 0.20,
+    "pullback_w_heat": 0.10,
+    "pullback_w_volume": 0.10,
+    "pullback_strong_days_scale": 70.0,
+    "pullback_max_s_scale": 30.0,
+    "pullback_recent_center": 0.4,
+    "pullback_recent_scale": 80.0,
+    "pullback_recent_min_floor": 2.0,
+    "pullback_recent_min_scale": 20.0,
+    "pullback_gate_recent_low": -1.5,
+    "pullback_gate_recent_high": 0.3,
+    "pullback_gate_recent_min": -3.0,
+    # warming_score（升温接力）权重
+    "warming_w_slope": 0.35,
+    "warming_w_amount": 0.15,
+    "warming_w_heat": 0.15,
+    "warming_w_stock": 0.20,
+    "warming_w_volume": 0.15,
+}
+
 CONCEPT_WORKERS = env_int("OMG_ROT_CONCEPT_WORKERS", 20)
 STOCK_WORKERS = env_int("OMG_ROT_STOCK_WORKERS", 20)
 
@@ -111,9 +146,13 @@ def _stock_score(feat):
         return 0.0
     avg = float(feat.get("top5_avg_change_pct", 0.0) or 0.0)
     pos = float(feat.get("positive_ratio", 0.0) or 0.0)
+    s = _SCORING
     return _clamp(
-        _clamp((avg + 2.0) / 5.0 * 40.0, upper=40.0)
-        + _clamp(pos * 60.0, upper=60.0)
+        _clamp(
+            (avg + s["stock_avg_center"]) / 5.0 * s["stock_avg_scale"],
+            upper=s["stock_avg_scale"],
+        )
+        + _clamp(pos * s["stock_pos_scale"], upper=s["stock_pos_scale"])
     )
 
 
@@ -122,13 +161,21 @@ def _heat_score(hot_row):
         return 0.0
     rank = finite_float(hot_row.get("rank"))
     hot_val = finite_float(hot_row.get("hot_value"))
+    s = _SCORING
     rs = 0.0
     hs = 0.0
     if rank is not None:
         rank = max(rank, 1.0)
-        rs = _clamp((21.0 - rank) / 20.0 * 50.0, upper=50.0)
+        rs = _clamp(
+            (s["heat_rank_span"] - rank) / (s["heat_rank_span"] - 1.0)
+            * s["heat_rank_scale"],
+            upper=s["heat_rank_scale"],
+        )
     if hot_val is not None:
-        hs = _clamp(hot_val / 100.0 * 50.0, upper=50.0)
+        hs = _clamp(
+            hot_val / 100.0 * s["heat_value_scale"],
+            upper=s["heat_value_scale"],
+        )
     return _clamp(rs + hs)
 
 
@@ -378,15 +425,31 @@ def pullback_score(strength_df, hot_row, feat):
     volume_res = _pullback_volume_score(tail)
     volume_s = volume_res["score"]
 
+    s = _SCORING
     score = (
-        _clamp(strong_days / 2.0 * 70.0 + max_s / 5.0 * 30.0) * 0.35
-        + _clamp(100.0 - abs(recent_mean + 0.4) * 80.0 - max(abs(recent_min) - 2.0, 0.0) * 20.0) * 0.25
-        + _stock_score(feat) * 0.2
-        + _heat_score(hot_row) * 0.1
-        + volume_s * 0.1
+        _clamp(
+            strong_days / 2.0 * s["pullback_strong_days_scale"]
+            + max_s / 5.0 * s["pullback_max_s_scale"]
+        )
+        * s["pullback_w_strong"]
+        + _clamp(
+            100.0
+            - abs(recent_mean + s["pullback_recent_center"])
+            * s["pullback_recent_scale"]
+            - max(abs(recent_min) - s["pullback_recent_min_floor"], 0.0)
+            * s["pullback_recent_min_scale"]
+        )
+        * s["pullback_w_recent"]
+        + _stock_score(feat) * s["pullback_w_stock"]
+        + _heat_score(hot_row) * s["pullback_w_heat"]
+        + volume_s * s["pullback_w_volume"]
     )
 
-    gate = was_strong and -1.5 < recent_mean <= 0.3 and recent_min > -3.0
+    gate = (
+        was_strong
+        and s["pullback_gate_recent_low"] < recent_mean <= s["pullback_gate_recent_high"]
+        and recent_min > s["pullback_gate_recent_min"]
+    )
 
     return {
         "score": round(_clamp(score), 2),
@@ -428,7 +491,14 @@ def warming_score(strength_df, hot_row, feat):
     volume_res = _warming_volume_score(tail)
     volume_s = volume_res["score"]
 
-    score = slope_s * 0.35 + amt_s * 0.15 + _heat_score(hot_row) * 0.15 + _stock_score(feat) * 0.20 + volume_s * 0.15
+    s = _SCORING
+    score = (
+        slope_s * s["warming_w_slope"]
+        + amt_s * s["warming_w_amount"]
+        + _heat_score(hot_row) * s["warming_w_heat"]
+        + _stock_score(feat) * s["warming_w_stock"]
+        + volume_s * s["warming_w_volume"]
+    )
     return {
         "score": round(_clamp(score), 2),
         "slope": round(slope, 2),

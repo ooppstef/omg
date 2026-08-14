@@ -157,22 +157,8 @@ class TestWatchAdviceHelpers(unittest.TestCase):
                 "stocks.watch_advice._fetch_kline_local", return_value=short
             ):
                 with mock.patch(
-                    "stocks.filter.db._fetch_one",
-                    return_value=("300308", [
-                        (
-                            "300308",
-                            row["trade_date"],
-                            row["open"],
-                            row["high"],
-                            row["low"],
-                            row["close"],
-                            row["volume"],
-                            row["amount"],
-                            row["change_pct"],
-                            row["turnover"],
-                        )
-                        for _, row in long.iterrows()
-                    ], None),
+                    "stocks.filter.db.fetch_quotes",
+                    return_value=(long, None),
                 ):
                     snap, err = watch_advice._fetch_tech_for_code(
                         "300308", start="2025-01-01"

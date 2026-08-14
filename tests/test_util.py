@@ -1,6 +1,5 @@
 """stocks.util 单元测试。"""
 
-import contextlib
 import os
 import threading
 import unittest
@@ -8,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from stocks.util import fmt_chg, force_direct_http
+from stocks.util import fmt_chg, force_direct_http, supports_color
 
 
 class TestFmtChg(unittest.TestCase):
@@ -27,6 +26,24 @@ class TestFmtChg(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 self.assertEqual(fmt_chg(value), "-")
+
+
+class TestSupportsColor(unittest.TestCase):
+    class Stream:
+        def __init__(self, is_tty):
+            self.is_tty = is_tty
+
+        def isatty(self):
+            return self.is_tty
+
+    def test_requires_tty(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(supports_color(self.Stream(True)))
+            self.assertFalse(supports_color(self.Stream(False)))
+
+    def test_no_color_presence_disables_color_even_when_empty(self):
+        with patch.dict(os.environ, {"NO_COLOR": ""}, clear=True):
+            self.assertFalse(supports_color(self.Stream(True)))
 
 
 class TestForceDirectHttp(unittest.TestCase):
@@ -153,25 +170,6 @@ class TestForceDirectHttp(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
 
         self.assertEqual(seen["proxies"].get("https"), proxy)
-
-
-    def test_fetch_spot_uses_direct_http(self):
-        from stocks import rank
-
-        calls = []
-
-        def fake_direct():
-            calls.append("direct")
-            return contextlib.nullcontext()
-
-        with patch("stocks.rank.force_direct_http", side_effect=fake_direct):
-            with patch(
-                "stocks.rank._fetch_em_spot_board",
-                side_effect=RuntimeError("down"),
-            ):
-                with self.assertRaises(ValueError):
-                    rank._fetch_spot()
-        self.assertEqual(calls, ["direct"])
 
 
 if __name__ == "__main__":

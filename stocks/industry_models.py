@@ -1,4 +1,4 @@
-from stocks.util import finite_float, fmt_chg
+from stocks.util import finite_float, fmt_chg, supports_color
 
 
 class IndustryConcept:
@@ -10,6 +10,17 @@ class IndustryConcept:
         self.hot_tag = hot_tag
 
     def __str__(self):
+        change_pct = finite_float(self.change_pct)
+        hot_value = finite_float(self.hot_value)
+        hot_text = f"{hot_value:g}" if hot_value is not None else "-"
+        if not supports_color():
+            return (
+                f"{self.concept_name} (代码: {self.concept_code}) - "
+                f"涨跌幅: {fmt_chg(change_pct)}, "
+                f"热度值: {hot_text}, "
+                f"热度标签: {self.hot_tag}"
+            )
+
         red, green, white, cyan, reset = (
             "\033[91m",
             "\033[92m",
@@ -17,15 +28,12 @@ class IndustryConcept:
             "\033[96m",
             "\033[0m",
         )
-        change_pct = finite_float(self.change_pct)
         if change_pct is not None and change_pct > 0:
             color = red
         elif change_pct is not None and change_pct < 0:
             color = green
         else:
             color = white
-        hot_value = finite_float(self.hot_value)
-        hot_text = f"{hot_value:g}" if hot_value is not None else "-"
 
         return (
             f"{self.concept_name} (代码: {self.concept_code}) - "

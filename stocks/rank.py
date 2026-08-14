@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -10,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from stocks.universe import A_SHARE_CODE_PREFIXES
-from stocks.util import finite_float, force_direct_http
+from stocks.util import finite_float
 
 DEFAULT_GAINERS = 50
 DEFAULT_LOSERS = 20
@@ -149,7 +148,6 @@ def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
                 "fields": _EM_SPOT_FIELDS,
             },
             timeout=15,
-            proxies={"http": None, "https": None},
         )
         resp.raise_for_status()
         data = (resp.json() or {}).get("data") or {}
@@ -174,6 +172,8 @@ def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
                     "换手率": item.get("f8"),
                 }
             )
+        if expected_total is not None and len(rows) >= expected_total:
+            break
         if len(diff) < 100:
             break
     if expected_total is not None and len(rows) < expected_total:
@@ -182,29 +182,28 @@ def _fetch_em_spot_board(fs: str, *, session=None) -> pd.DataFrame:
 
 
 def _fetch_spot() -> pd.DataFrame:
-    """东财沪深 A 股现货（push2delay + 强制直连）。"""
+    """东财沪深 A 股现货（push2delay；自建 Session 已禁用环境代理）。"""
     errors: list[str] = []
     frames: list[pd.DataFrame] = []
-    with force_direct_http():
-        session = _em_spot_session()
-        for label, fs in (("sh", _FS_SH), ("sz", _FS_SZ)):
-            try:
-                part = _fetch_em_spot_board(fs, session=session)
-                if part is not None and not part.empty:
-                    frames.append(part)
-                else:
-                    errors.append(f"{label}:empty")
-            except Exception as exc:
-                errors.append(f"{label}:{exc}")
-        if len(frames) == 2:
-            return pd.concat(frames, ignore_index=True)
+    session = _em_spot_session()
+    for label, fs in (("sh", _FS_SH), ("sz", _FS_SZ)):
         try:
-            whole = _fetch_em_spot_board(_FS_HS, session=session)
+            part = _fetch_em_spot_board(fs, session=session)
+            if part is not None and not part.empty:
+                frames.append(part)
+            else:
+                errors.append(f"{label}:empty")
         except Exception as exc:
-            errors.append(f"all:{exc}")
-            whole = None
-        if whole is not None and not whole.empty:
-            return whole
+            errors.append(f"{label}:{exc}")
+    if len(frames) == 2:
+        return pd.concat(frames, ignore_index=True)
+    try:
+        whole = _fetch_em_spot_board(_FS_HS, session=session)
+    except Exception as exc:
+        errors.append(f"all:{exc}")
+        whole = None
+    if whole is not None and not whole.empty:
+        return whole
     raise ValueError(
         f"拉取现货失败（分市场完整度 {len(frames)}/2）: {errors}"
     )
@@ -251,56 +250,17 @@ def _attach_tags(
 
 
 def _live_industry_by_code(needed: set[str]) -> dict[str, Optional[str]]:
-    """东财行业成分反查；多行业取字典序最小。"""
-    if not needed:
-        return {}
-    from stocks import crowd
+    """东财行业成分反查；多行业取字典序最小（转发 tags 缓存服务）。"""
+    from stocks import tags
 
-    em = crowd._list_em_industries()
-    if not em:
-        return {code: None for code in needed}
-
-    def one(item: tuple[str, str]) -> dict[str, set[str]]:
-        name, bk = item
-        local: dict[str, set[str]] = {}
-        for code, _stock_name in crowd._fetch_em_constituents(bk):
-            code = str(code).strip()
-            if code in needed:
-                local.setdefault(code, set()).add(name)
-        return local
-
-    merged: dict[str, set[str]] = {code: set() for code in needed}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for partial in pool.map(one, list(em.items())):
-            for code, names in partial.items():
-                merged[code].update(names)
-
-    return {
-        code: (sorted(names)[0] if names else None)
-        for code, names in merged.items()
-    }
+    return tags.industry_by_code(needed)
 
 
 def _live_hot_concept_names(top: int = HOT_CONCEPT_TOP) -> list[str]:
-    from stocks import ana
+    """当前热点概念名（转发 tags 缓存服务）。"""
+    from stocks import tags
 
-    # 优先同花顺热概念（轻量）；强度 Top 作回退，避免每次 rank 全量重算 hot
-    try:
-        concepts = ana.hot_concept_ths(top=top, print_result=False) or []
-        names = [
-            str(getattr(c, "concept_name", None) or getattr(c, "name", "") or "")
-            for c in concepts
-        ]
-        names = [n for n in names if n]
-        if names:
-            return names[:top]
-    except Exception:
-        pass
-    daily = ana.concept_strength_top10(days=5, top=top, print_result=False)
-    if isinstance(daily, dict) and daily:
-        latest = max(daily.keys())
-        return [str(name) for name, _score in daily[latest][:top]]
-    return []
+    return tags.hot_concept_names(top=top)
 
 
 def _live_concepts_by_code(
@@ -310,61 +270,15 @@ def _live_concepts_by_code(
     concept_df: Optional[pd.DataFrame] = None,
     fetch_constituent=None,
 ) -> dict[str, list[str]]:
-    if not hot_names or not needed:
-        return {code: [] for code in needed}
+    """股票代码 -> 命中热点概念名（转发 tags 缓存服务）。"""
+    from stocks import tags
 
-    if concept_df is None or fetch_constituent is None:
-        import adata
-
-        if concept_df is None:
-            try:
-                concept_df = adata.stock.info.all_concept_code_ths()
-            except Exception:
-                return {code: [] for code in needed}
-        if fetch_constituent is None:
-            fetch_constituent = (
-                lambda index_code: adata.stock.info.concept_constituent_ths(
-                    index_code=index_code
-                )
-            )
-
-    if concept_df is None or concept_df.empty:
-        return {code: [] for code in needed}
-
-    name_to_code: dict[str, str] = {}
-    for _, row in concept_df.iterrows():
-        name = str(row.get("name") or "").strip()
-        code = str(row.get("index_code") or "").strip()
-        if name and code and name not in name_to_code:
-            name_to_code[name] = code
-
-    ordered = [(n, name_to_code[n]) for n in hot_names if n in name_to_code]
-    membership: dict[str, list[str]] = {code: [] for code in needed}
-
-    def fetch(pair: tuple[str, str]) -> tuple[str, set[str]]:
-        name, index_code = pair
-        try:
-            df = fetch_constituent(index_code)
-        except Exception:
-            return name, set()
-        if df is None or df.empty or "stock_code" not in df.columns:
-            return name, set()
-        codes = {str(c).strip() for c in df["stock_code"].tolist()}
-        return name, codes & needed
-
-    results: dict[str, set[str]] = {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        fmap = {pool.submit(fetch, p): p[0] for p in ordered}
-        for fut in as_completed(fmap):
-            name, codes = fut.result()
-            results[name] = codes
-
-    for name in hot_names:
-        codes = results.get(name) or set()
-        for code in codes:
-            if len(membership[code]) < MAX_CONCEPTS:
-                membership[code].append(name)
-    return membership
+    return tags.concepts_by_code(
+        needed,
+        hot_names,
+        concept_df=concept_df,
+        fetch_constituent=fetch_constituent,
+    )
 
 
 def analyze(

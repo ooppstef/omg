@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS DailyQuote (
 
 _UPDATE_THREAD_LOCK = RLock()
 _UPDATE_LOCK_STATE = local()
+_EXCHANGE_PATCH_LOCK = RLock()
 _QUOTE_TABLES = frozenset({"DailyQuote", "DailyQuote_tmp"})
 
 
@@ -133,24 +134,52 @@ def _init_table():
         c.execute(DDL)
 
 
+@contextmanager
+def _safe_exchange_patch():
+    """在 all_code() 调用期间临时兜底 adata 的交易所代码解析。
+
+    adata 对未知代码前缀(如 81 开头港股通)的 get_exchange_by_stock_code 会抛 KeyError。
+    原实现直接覆盖模块属性，是进程级永久副作用；改为仅在调用期间生效、退出即恢复。
+
+    专用 RLock 覆盖整个 patch 窗口，使直接调用 _all_codes() 时也不会出现两个
+    补丁交错恢复；无需依赖调用方恰好持有更新锁。
+    """
+    import sys
+
+    import adata.common.utils.code_utils as _cu
+
+    with _EXCHANGE_PATCH_LOCK:
+        original_cu = _cu.get_exchange_by_stock_code
+        # adata 的 stock_code 模块用 from import 绑定了局部引用，也要 patch；
+        # 用 sys.modules 探测，避免该子模块缺失时直接 import 抛错。
+        _sc_mod = sys.modules.get("adata.stock.info.stock_code")
+        original_sc = (
+            getattr(_sc_mod, "get_exchange_by_stock_code", None)
+            if _sc_mod
+            else None
+        )
+
+        def _safe_exchange(code):
+            try:
+                return original_cu(code)
+            except KeyError:
+                return ""
+
+        _cu.get_exchange_by_stock_code = _safe_exchange
+        if original_sc is not None:
+            _sc_mod.get_exchange_by_stock_code = _safe_exchange
+        try:
+            yield
+        finally:
+            _cu.get_exchange_by_stock_code = original_cu
+            if original_sc is not None:
+                _sc_mod.get_exchange_by_stock_code = original_sc
+
+
 def _all_codes():
     """全市场股票代码（主板/创业板/科创板，排除ST）。"""
-    # adata 内部对未知代码前缀(如81开头港股通)会 KeyError，patch 掉
-    import sys
-    import adata.common.utils.code_utils as _cu
-    _orig = _cu.get_exchange_by_stock_code
-    def _safe_exchange(code):
-        try:
-            return _orig(code)
-        except KeyError:
-            return ""
-    _cu.get_exchange_by_stock_code = _safe_exchange
-    # adata 的 stock_code 模块用 from import 绑定了局部引用，也要 patch
-    _sc = sys.modules.get("adata.stock.info.stock_code")
-    if _sc:
-        _sc.get_exchange_by_stock_code = _safe_exchange
-
-    df = adata.stock.info.all_code()
+    with _safe_exchange_patch():
+        df = adata.stock.info.all_code()
     if df is None or df.empty:
         return []
     codes = []
@@ -656,6 +685,37 @@ def ensure_data(progress=True):
 
     with open(stamp, "w", encoding="utf-8") as f:
         f.write(target)
+
+
+def fetch_quotes_frame(code, start=None, end=None):
+    """本地库按代码读取日线，返回标准列 DataFrame（过滤非法 OHLCV）。"""
+    params: list = [str(code)]
+    clause = "code = ?"
+    if start is not None:
+        clause += " AND trade_date >= ?"
+        params.append(str(start))
+    if end is not None:
+        clause += " AND trade_date <= ?"
+        params.append(str(end))
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(_QUOTE_COLUMNS)} FROM DailyQuote "
+            f"WHERE {clause} ORDER BY trade_date",
+            params,
+        ).fetchall()
+    return _sanitize_quote_frame(pd.DataFrame(rows, columns=_QUOTE_COLUMNS))
+
+
+def fetch_quotes(code, start):
+    """adata 拉取单只日线并清洗为标准列 DataFrame。
+
+    返回 (frame, error)；供 watch_advice 等技术面取证作为末选数据源。
+    """
+    _code, rows, err = _fetch_one(code, start)
+    if err is not None:
+        return pd.DataFrame(columns=_QUOTE_COLUMNS), err
+    frame = pd.DataFrame(rows, columns=_QUOTE_COLUMNS)
+    return _sanitize_quote_frame(frame), None
 
 
 def load_all(min_rows=60):

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from stocks.quote import clean_numeric, parse_date_series
 from stocks.util import finite_float, recent_date
 
 MAX_WATCH = 30
@@ -102,29 +103,6 @@ def _vol_stance(rel_vol: float | None) -> str | None:
     return "量能偏弱"
 
 
-def _quote_df(rows: list[tuple]) -> pd.DataFrame:
-    """filter.db._fetch_one 的 rows → OHLCV DataFrame。"""
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "code",
-            "trade_date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "amount",
-            "change_pct",
-            "turnover",
-        ],
-    )
-    df = df.sort_values("trade_date").reset_index(drop=True)
-    return df
-
-
 def _tech_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     from stocks.filter.indicator import compute_all
 
@@ -182,10 +160,9 @@ def _df_from_ak_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
     required = ("open", "high", "low", "close", "volume")
     if not set(required).issubset(out.columns):
         return pd.DataFrame()
-    parsed_dates = pd.to_datetime(out["trade_date"], errors="coerce")
+    parsed_dates = parse_date_series(out["trade_date"])
     for column in (*required, "amount", "change_pct", "turnover"):
-        out[column] = pd.to_numeric(out[column], errors="coerce")
-    out = out.replace([float("inf"), float("-inf")], pd.NA)
+        out[column] = clean_numeric(out[column])
 
     valid = parsed_dates.notna()
     valid &= (out[list(required[:4])] > 0).all(axis=1)
@@ -243,16 +220,9 @@ def _fetch_kline_local(code: str, *, start: str) -> pd.DataFrame:
     from stocks.filter import db as filter_db
 
     try:
-        with filter_db._conn() as conn:
-            rows = conn.execute(
-                "SELECT code, trade_date, open, high, low, close, volume, "
-                "amount, change_pct, turnover FROM DailyQuote "
-                "WHERE code=? AND trade_date>=? ORDER BY trade_date",
-                (code, start),
-            ).fetchall()
+        return filter_db.fetch_quotes_frame(code, start=start)
     except Exception:
         return pd.DataFrame()
-    return filter_db._sanitize_quote_frame(_quote_df(list(rows)))
 
 
 _MIN_BARS = 30
@@ -290,13 +260,13 @@ def _fetch_tech_for_code(code: str, *, start: str) -> tuple[Optional[dict], Opti
         try:
             from stocks.filter import db as filter_db
 
-            _code, rows, err = filter_db._fetch_one(code, start)
+            frame, err = filter_db.fetch_quotes(code, start)
             if err is not None:
                 errors.append(f"adata:{type(err).__name__}")
-            elif not rows:
+            elif frame.empty:
                 errors.append("adata:empty")
             else:
-                ordered.append(("adata", _quote_df(rows)))
+                ordered.append(("adata", frame))
         except Exception as exc:
             errors.append(f"adata:{type(exc).__name__}")
 
@@ -465,7 +435,7 @@ def analyze(
     """组装自选逐票取证。可注入依赖便于单测。"""
     import stocks.market as market_mod
     import stocks.watch_list as watch_list
-    from stocks import rank
+    from stocks import tags
 
     errors: list[str] = []
     truncated = False
@@ -537,7 +507,7 @@ def analyze(
     shared_hot = hot_data
     if industry_by_code is None:
         try:
-            industry_by_code = rank._live_industry_by_code(needed) if needed else {}
+            industry_by_code = tags.industry_by_code(needed) if needed else {}
         except Exception as exc:
             industry_by_code = {c: None for c in needed}
             errors.append(f"industry:{type(exc).__name__}")
@@ -563,9 +533,9 @@ def analyze(
                     str(name) for name, _score in (shared_hot.get(latest) or [])
                 ]
             if not hot_names and needed:
-                hot_names = rank._live_hot_concept_names()
+                hot_names = tags.hot_concept_names()
             concepts_by_code = (
-                rank._live_concepts_by_code(hot_names, needed) if needed else {}
+                tags.concepts_by_code(needed, hot_names) if needed else {}
             )
         except Exception as exc:
             concepts_by_code = {c: [] for c in needed}

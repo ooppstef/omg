@@ -1,5 +1,7 @@
 import math
 
+from stocks.util import supports_color
+
 
 class StockBase:
     def __init__(self, id, code, name, short, exchange):
@@ -42,11 +44,14 @@ class StockCurrentPrice:
             return "--"
         if not math.isfinite(change):
             return "--"
+        text = f"{self.change_percent}%"
+        if not supports_color():
+            return text
         if change > 0:
-            return f"\033[91m{self.change_percent}%\033[0m"
+            return f"\033[91m{text}\033[0m"
         if change < 0:
-            return f"\033[92m{self.change_percent}%\033[0m"
-        return f"{self.change_percent}%"
+            return f"\033[92m{text}\033[0m"
+        return text
 
     def price_text(self):
         try:

@@ -13,6 +13,13 @@ def _spot_rows(rows):
 
 
 class TestRankFilter(unittest.TestCase):
+    def test_em_spot_session_disables_environment_proxies(self):
+        session = rank._em_spot_session()
+        try:
+            self.assertFalse(session.trust_env)
+        finally:
+            session.close()
+
     def test_excludes_st_bj_and_invalid_quotes(self):
         df = _spot_rows(
             [
@@ -355,6 +362,43 @@ class TestRankAnalyze(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out.iloc[0]["代码"], "600000")
         self.assertEqual(out.iloc[0]["名称"], "甲")
+
+    def test_fetch_em_spot_board_stops_when_total_is_exact_page_size(self):
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "data": {
+                        "total": 100,
+                        "diff": [
+                            {
+                                "f12": f"600{i:03d}",
+                                "f14": f"股票{i}",
+                                "f2": 10.0,
+                                "f3": 1.0,
+                                "f6": 1e8,
+                                "f8": 2.0,
+                            }
+                            for i in range(100)
+                        ],
+                    }
+                }
+
+        class FakeSession:
+            calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls > 1:
+                    raise AssertionError("不应请求多余空页")
+                return FakeResp()
+
+        session = FakeSession()
+        out = rank._fetch_em_spot_board(rank._FS_SH, session=session)
+        self.assertEqual(len(out), 100)
+        self.assertEqual(session.calls, 1)
 
     def test_fetch_em_spot_board_rejects_incomplete_pagination(self):
         class FakeResp:
