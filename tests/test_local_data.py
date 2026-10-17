@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 import sqlite3
 import tempfile
 import unittest
@@ -6,6 +7,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from stocks import copy_watchlist, db, list_parser, paths
+
+
+@contextmanager
+def _open(database):
+    """测试用连接：事务语义同 `with conn:`，退出时 close。
+
+    `with sqlite3.connect(...) as conn:` 不关闭连接，连接进引用环只靠
+    循环 GC 回收，Windows 上句柄不释放会导致临时库文件删不掉。
+    """
+    conn = sqlite3.connect(database)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 class TestLocalDataPaths(unittest.TestCase):
@@ -120,15 +136,16 @@ class TestLocalDataPaths(unittest.TestCase):
 
     def test_database_migration_handles_uri_special_characters(self):
         with tempfile.TemporaryDirectory() as tmp:
-            legacy = Path(tmp) / "legacy?#.db"
+            # Windows/NTFS 不允许 ? 出现在文件名中，用 # 和 % 覆盖 URI 特殊字符
+            legacy = Path(tmp) / "legacy#%.db"
             target = Path(tmp) / "target.db"
-            with sqlite3.connect(legacy) as conn:
+            with _open(legacy) as conn:
                 conn.execute("CREATE TABLE sample(value TEXT)")
                 conn.execute("INSERT INTO sample VALUES ('ok')")
 
             paths._copy_legacy_file(legacy, target)
 
-            with sqlite3.connect(target) as conn:
+            with _open(target) as conn:
                 value = conn.execute("SELECT value FROM sample").fetchone()[0]
             self.assertEqual(value, "ok")
 

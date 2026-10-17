@@ -129,8 +129,24 @@ def _conn():
     return sqlite3.connect(dir_path())
 
 
+@contextmanager
+def _connect():
+    """连接上下文：事务语义同 `with conn:`，并保证退出时 close。
+
+    `with sqlite3.connect(...) as conn:` 只提交/回滚事务、不关闭连接，
+    连接对象会进入引用环，只有循环 GC 才回收；Windows 上句柄不释放会导致
+    临时库文件删不掉、原子换表 os.replace 失败。
+    """
+    conn = _conn()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _init_table():
-    with _conn() as c:
+    with _connect() as c:
         c.execute(DDL)
 
 
@@ -433,7 +449,7 @@ def _target_date():
 
 def _latest_date():
     """DB 中最新 trade_date，无数据返回 None。"""
-    with _conn() as c:
+    with _connect() as c:
         row = c.execute("SELECT MAX(trade_date) FROM DailyQuote").fetchone()
     return row[0] if row and row[0] else None
 
@@ -513,7 +529,7 @@ def incremental_update(progress=True, target_date=None, codes=None):
     if last is None:
         if not full_init(progress, codes=codes):
             return False
-        with _conn() as conn:
+        with _connect() as conn:
             _require_coverage(
                 conn,
                 codes,
@@ -521,7 +537,7 @@ def incremental_update(progress=True, target_date=None, codes=None):
             )
         return True
     if last >= target_date:
-        with _conn() as conn:
+        with _connect() as conn:
             _, _, ratio = _check_coverage(
                 conn,
                 codes,
@@ -607,7 +623,7 @@ def ensure_data(progress=True):
         raise RuntimeError("获取股票列表失败，无法验证数据完整性")
 
     if latest is not None:
-        with _conn() as conn:
+        with _connect() as conn:
             history_count, history_ratio = _check_history_coverage(conn, codes)
         if history_ratio < INIT_COVERAGE_GATE:
             if progress:
@@ -620,7 +636,7 @@ def ensure_data(progress=True):
             latest = _latest_date()
             if latest is None or latest < target:
                 raise RuntimeError(f"全量重建后仍未达到目标交易日 {target}")
-            with _conn() as conn:
+            with _connect() as conn:
                 history_count, history_ratio = _check_history_coverage(conn, codes)
             if history_ratio < INIT_COVERAGE_GATE:
                 raise RuntimeError(
@@ -632,7 +648,7 @@ def ensure_data(progress=True):
         with open(stamp, encoding="utf-8") as f:
             stamp_value = f.read().strip()
     if _stamp_matches_target(stamp_value, target, latest):
-        with _conn() as conn:
+        with _connect() as conn:
             _, _, ratio = _check_coverage(
                 conn,
                 codes,
@@ -665,12 +681,14 @@ def ensure_data(progress=True):
     # 日期最新，检查覆盖率（分母用全市场应有数，防止残缺库自我验证100%）
     expected = len(codes)
     conn = _conn()
-    latest, count, ratio = _check_coverage(
-        conn,
-        codes,
-        expected_date=target,
-    )
-    conn.close()
+    try:
+        latest, count, ratio = _check_coverage(
+            conn,
+            codes,
+            expected_date=target,
+        )
+    finally:
+        conn.close()
 
     if ratio < COVERAGE_GATE:
         if progress:
@@ -697,7 +715,7 @@ def fetch_quotes_frame(code, start=None, end=None):
     if end is not None:
         clause += " AND trade_date <= ?"
         params.append(str(end))
-    with _conn() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             f"SELECT {', '.join(_QUOTE_COLUMNS)} FROM DailyQuote "
             f"WHERE {clause} ORDER BY trade_date",
@@ -721,8 +739,10 @@ def fetch_quotes(code, start):
 def load_all(min_rows=60):
     """加载全部日线，返回 {code: DataFrame}，过滤不足 min_rows 的。"""
     conn = _conn()
-    df = pd.read_sql("SELECT * FROM DailyQuote ORDER BY code, trade_date", conn)
-    conn.close()
+    try:
+        df = pd.read_sql("SELECT * FROM DailyQuote ORDER BY code, trade_date", conn)
+    finally:
+        conn.close()
     df = _sanitize_quote_frame(df)
     if df.empty:
         return {}

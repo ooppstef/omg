@@ -1,4 +1,6 @@
 import os
+from contextlib import closing
+
 import adata
 import sqlite3
 from threading import RLock
@@ -56,7 +58,9 @@ def _query(query, params, fetch_all):
     for attempt in range(2):
         _ensure_table()
         try:
-            with sqlite3.connect(dir_path()) as conn:
+            # closing：`with sqlite3.connect(...) as conn:` 不关闭连接，
+            # 连接进引用环只靠循环 GC 回收，Windows 上句柄不释放
+            with closing(sqlite3.connect(dir_path())) as conn:
                 cursor = conn.execute(query, params)
                 return cursor.fetchall() if fetch_all else cursor.fetchone()
         except sqlite3.OperationalError as exc:

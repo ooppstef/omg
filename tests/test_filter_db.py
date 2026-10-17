@@ -1,4 +1,5 @@
 import datetime
+from contextlib import contextmanager
 import sqlite3
 import os
 import tempfile
@@ -9,6 +10,21 @@ from unittest.mock import patch
 import pandas as pd
 
 from stocks.filter import db
+
+
+@contextmanager
+def _open(database):
+    """测试用连接：事务语义同 `with conn:`，退出时 close。
+
+    `with sqlite3.connect(...) as conn:` 不关闭连接，连接进引用环只靠
+    循环 GC 回收，Windows 上句柄不释放会导致临时库文件删不掉。
+    """
+    conn = sqlite3.connect(database)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 class TestCoverage(unittest.TestCase):
@@ -281,7 +297,7 @@ class TestBatchFetch(unittest.TestCase):
     def test_load_all_filters_invalid_rows_before_minimum_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "quotes.db"
-            with sqlite3.connect(database) as conn:
+            with _open(database) as conn:
                 conn.execute(db.DDL)
                 conn.executemany(
                     "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -364,7 +380,7 @@ class TestBatchFetch(unittest.TestCase):
             def connect():
                 return sqlite3.connect(database)
 
-            with connect() as conn:
+            with _open(database) as conn:
                 conn.execute(db.DDL)
                 conn.execute(
                     "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -406,7 +422,7 @@ class TestBatchFetch(unittest.TestCase):
             def connect():
                 return sqlite3.connect(database)
 
-            with connect() as conn:
+            with _open(database) as conn:
                 conn.execute(db.DDL)
                 conn.execute(
                     "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -414,7 +430,7 @@ class TestBatchFetch(unittest.TestCase):
                 )
 
             def fill(_progress=True, target_date=None, codes=None):
-                with connect() as conn:
+                with _open(database) as conn:
                     conn.execute(
                         "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
                         ("000002", target_date, 1, 1, 1, 1, 1, 1, 0, 0),
@@ -440,7 +456,7 @@ class TestBatchFetch(unittest.TestCase):
             def connect():
                 return sqlite3.connect(database)
 
-            with connect() as conn:
+            with _open(database) as conn:
                 conn.execute(db.DDL)
 
             with (
@@ -464,7 +480,7 @@ class TestBatchFetch(unittest.TestCase):
             def connect():
                 return sqlite3.connect(database)
 
-            with connect() as conn:
+            with _open(database) as conn:
                 conn.execute(db.DDL)
                 conn.executemany(
                     "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -483,7 +499,7 @@ class TestBatchFetch(unittest.TestCase):
                         rows.append(
                             (code, trade_date, 1, 1, 1, 1, 1, 1, 0, 0)
                         )
-                with connect() as conn:
+                with _open(database) as conn:
                     conn.execute("DELETE FROM DailyQuote")
                     conn.executemany(
                         "INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)",

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from stocks.list_parser import initialize_my_list, my_list_path
+from stocks.list_parser import KNOWN_SECTIONS, initialize_my_list, my_list_path
 from stocks.paths import temporary_path_for
 
 
@@ -9,6 +9,11 @@ TARGET_ENV_NAME = "OMG_COPY_TARGET_PATH"
 
 
 def extract_section_lines(content, section_name):
+    """提取指定 section 的行，语义与 list_parser.parse_sections 一致：
+
+    只有「# 自选 / # 查看」等已知 section 头切换段落；其它「# 」行是段内注释，
+    不终止提取（否则自选段里写注释会导致后续股票全部丢失）。
+    """
     lines = content.splitlines()
     current_section = None
     found = False
@@ -17,11 +22,12 @@ def extract_section_lines(content, section_name):
     for raw_line in lines:
         line = raw_line.strip()
         if line.startswith("# "):
-            current_section = line[2:].strip()
-            if found:
-                break
-            if current_section == section_name:
-                found = True
+            name = line[2:].strip()
+            if name in KNOWN_SECTIONS:
+                if found and name != section_name:
+                    break
+                current_section = name
+                found = found or name == section_name
             continue
 
         if found and current_section == section_name and line:

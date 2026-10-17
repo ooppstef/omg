@@ -1858,7 +1858,7 @@ def rank_bottom(
     """底部启动榜：位置还低 + 当日/3 日转强 + 放量，按**启动标志加权分**排序（量能、形态为主）。
 
     `score` 是启动分位（低位池内量价的分位，用于粗排与同分次序）；`launch` 是启动标志的
-    命中清单与加权分（量能 3 条、形态 4 条各 2 分，价格/方向各 1 分），是主排序键。
+    命中清单与加权分（量能 3 条、资金 1 条、形态 5 条各 2 分，价格/方向各 1 分，满分 20），是主排序键。
     """
     pool = [r for r in records if _is_bottom_start(r)]
     if not pool:
@@ -2132,6 +2132,10 @@ def _prepare_theme_maps(
     cluster_order: dict[str, list] = {}
     for cluster, theme in zip(clusters, themes):
         name = theme.get("name")
+        # 概念线与行业线可能同名（如「游戏」概念 vs「游戏」行业）：clusters 按
+        # 分数降序，同名时保留更强的一条，避免后一条静默覆盖前一条的簇内排名
+        if name in cluster_order:
+            continue
         codes = [c for c in cluster["member_codes"] if _is_a_share(c)]
         cluster_order[name] = sorted(
             codes, key=lambda c: (-(key_map.get(c, -999.0)), c)
@@ -2383,7 +2387,12 @@ def analyze(
     tech_map: dict[str, Any] = dict(tech_by_code or {})
     _fetch_tech_map([c["code"] for c in candidates] + bottom_codes, tech_map, errors)
 
-    theme_risk = {t.get("name"): t.get("s_risk") for t in themes}
+    # 同名主题线只保留分位更高的一条的退潮风险（themes 与 clusters 同序、按分数降序）
+    theme_risk: dict[str, Any] = {}
+    for theme in themes:
+        name = theme.get("name")
+        if name not in theme_risk:
+            theme_risk[name] = theme.get("s_risk")
     market_lines = _market_context_lines(regime, style_info, sentiment)
     ranked = rank_stocks(
         candidates,
