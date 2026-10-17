@@ -82,7 +82,7 @@ class TestTools(unittest.TestCase):
         names = {s["function"]["name"] for s in ai_tools.schemas()}
         self.assertEqual(
             names,
-            {"mood", "style", "rot", "crowd", "etf", "hot", "list", "rank", "watch_advice", "web_search"},
+            {"mood", "style", "rot", "crowd", "etf", "hot", "strength", "list", "rank", "watch_advice", "web_search"},
         )
 
     def test_unknown_tool(self):
@@ -743,19 +743,24 @@ class TestSkills(unittest.TestCase):
         self.assertIn("有量价", skill["body"])
         self.assertIn("session_path", skill["body"])
         self.assertIn("高开低走", skill["body"])
-        self.assertIn("## 明日观察推荐", skill["body"])
-        self.assertIn("严格 <5", skill["body"])
-        self.assertIn("0～4", skill["body"])
+        self.assertIn("## 底部启动", skill["body"])
+        self.assertIn("## 推荐关注", skill["body"])
+        self.assertIn("严格 ≤10", skill["body"])
+        self.assertIn("0～10", skill["body"])
         self.assertIn("跌侧", skill["body"])
         self.assertIn("高门槛", skill["body"])
         self.assertIn("牵动", skill["body"])
-        self.assertIn("暂无明确观察票", skill["body"])
+        self.assertIn("暂无明确关注票", skill["body"])
         self.assertIn("主要用于", skill["body"])
         self.assertIn("关注建议」无具体代码", skill["body"])
         self.assertIn("绝对成交额不能证明放量", skill["body"])
         self.assertIn("启发式", skill["body"])
         self.assertIn("时点", skill["body"])
         self.assertIn("主线 0～3 条", skill["body"])
+        self.assertIn("## 近期强势", skill["body"])
+        self.assertIn("strength", skill["body"])
+        self.assertIn("截面分位", skill["body"])
+        self.assertIn("跨行业", skill["body"])
         self.assertNotIn("主线 2～3 条", skill["body"])
         self.assertNotIn("表述相对放量与否", skill["body"])
         self.assertNotIn("只在 `## 自选操作建议` 使用", skill["body"])
@@ -766,14 +771,15 @@ class TestSkills(unittest.TestCase):
         )
         self.assertIn("rank", ai_chat.SYSTEM)
         self.assertIn("watch_advice", ai_chat.SYSTEM)
+        self.assertIn("strength", ai_chat.SYSTEM)
         self.assertIn("量价", ai_chat.SYSTEM)
         self.assertIn("绝对成交额", ai_chat.SYSTEM)
         self.assertIn("启发式", ai_chat.SYSTEM)
         self.assertIn("时点", ai_chat.SYSTEM)
-        self.assertIn("明日观察推荐", ai_chat.SYSTEM)
+        self.assertIn("底部启动", ai_chat.SYSTEM)
         self.assertIn("独立涨跌榜", ai_chat.SYSTEM_RESEARCH)
         self.assertIn("自选操作建议", ai_chat.SYSTEM_RESEARCH)
-        self.assertIn("明日观察推荐", ai_chat.SYSTEM_RESEARCH)
+        self.assertIn("推荐关注", ai_chat.SYSTEM_RESEARCH)
         self.assertIn("量能", ai_chat.SYSTEM_RESEARCH)
         self.assertNotIn("或本轮用了 rank", ai_chat.SYSTEM_RESEARCH)
 

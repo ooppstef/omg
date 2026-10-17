@@ -43,7 +43,7 @@ omg chat --skill omg-daily-review      # 强制挂载日复盘
 omg chat --skill omg-theme-research    # 强制挂载主题研究
 ```
 
-两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / list / rank / watch_advice），并同时打开 research（更多 tool 预算）；最终输出结构化的：结论 / 依据 / 涨跌榜 / 自选操作建议 / 风险 / 建议。
+两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / list / rank / watch_advice），并同时打开 research（更多 tool 预算）；最终输出结构化的：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 底部启动 / 推荐关注 / 风险 / 建议。
 
 ## 安装
 

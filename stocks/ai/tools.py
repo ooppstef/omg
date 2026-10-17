@@ -220,6 +220,35 @@ def _tool_hot(args: dict) -> dict:
     return _ok(data)
 
 
+def _tool_strength(args: dict) -> dict:
+    import stocks.strength as strength
+
+    with _quiet():
+        data = strength.analyze(
+            top_concepts=_int_arg(
+                args, "top_concepts", strength.DEFAULT_TOP_CONCEPTS, strength.MAX_TOP_BOARDS
+            ),
+            top_industries=_int_arg(
+                args,
+                "top_industries",
+                strength.DEFAULT_TOP_INDUSTRIES,
+                strength.MAX_TOP_BOARDS,
+            ),
+            max_stocks=_int_arg(
+                args, "max_stocks", strength.DEFAULT_MAX_STOCKS, strength.MAX_STOCKS_LIMIT
+            ),
+            max_candidates=_int_arg(
+                args,
+                "max_candidates",
+                strength.DEFAULT_MAX_CANDIDATES,
+                strength.MAX_CANDIDATES_LIMIT,
+            ),
+        )
+    if not data:
+        return _err("近期强势取证失败：板块与个股均无数据")
+    return _ok(data)
+
+
 def _tool_list(_args: dict) -> dict:
     from concurrent.futures import ThreadPoolExecutor
 
@@ -318,6 +347,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "crowd": _tool_crowd,
     "etf": _tool_etf,
     "hot": _tool_hot,
+    "strength": _tool_strength,
     "list": _tool_list,
     "rank": _tool_rank,
     "watch_advice": _tool_watch_advice,
@@ -327,7 +357,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
 # 短时缓存只读行情 tools，避免同一轮复盘重复拉数；不能按整日缓存，
 # 否则早盘快照会一直冒充收盘数据。
 _CACHEABLE_TOOLS = frozenset(
-    {"mood", "style", "rot", "crowd", "etf", "hot"}
+    {"mood", "style", "rot", "crowd", "etf", "hot", "strength"}
 )
 _DEFAULT_CACHE_TTL_SECONDS = 300
 _TOOL_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
@@ -528,6 +558,48 @@ def schemas() -> list[dict]:
                             "description": "默认 10",
                             "minimum": 1,
                             "maximum": 30,
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "strength",
+                "description": (
+                    "近期强势体检（日复盘主用）：market regime + 主题线强度榜（概念∪行业，按成分股重叠合并，可跨行业抱团）"
+                    "+ 个股强度榜（3/5/10/60日涨幅、量比、相对沪深300 超额、日线技术面、剩余空间 space、回落性质 pullback、操作口径 action）"
+                    "+ 底部启动榜 bottom（位置还低 + 当日/3日转强 + 放量 + 启动标志 launch + 主力净流入，字段同个股榜）"
+                    "+ 主题线退潮迹象 s_risk / fade_signals。score / turn_score 是同一截面内的分位（0~100），描述性标签非预测概率；"
+                    "space（异动口径近似 + 连板高度）与 action（低吸/追高/不参与）是规则映射，非建议、不给点位；报价交易日见 quote_trade_date"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "top_concepts": {
+                            "type": "integer",
+                            "description": "概念强度榜取前 N，默认 8",
+                            "minimum": 1,
+                            "maximum": 30,
+                        },
+                        "top_industries": {
+                            "type": "integer",
+                            "description": "行业强度榜取前 N（并入主题线），默认 6",
+                            "minimum": 1,
+                            "maximum": 30,
+                        },
+                        "max_stocks": {
+                            "type": "integer",
+                            "description": "个股强度榜条数，默认 12",
+                            "minimum": 1,
+                            "maximum": 30,
+                        },
+                        "max_candidates": {
+                            "type": "integer",
+                            "description": "逐只精算日线的候选上限，默认 24；调大更慢",
+                            "minimum": 1,
+                            "maximum": 60,
                         },
                     },
                 },
