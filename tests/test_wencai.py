@@ -52,6 +52,7 @@ class TestParseRobotPayload(unittest.TestCase):
         )
         parsed = wencai._parse_robot_payload(payload)
         self.assertEqual(parsed["count"], 2)
+        self.assertEqual(parsed["total"], 2)
         self.assertEqual(parsed["rows"][0]["股票简称"], "中信海直")
         self.assertEqual(parsed["columns"], ["股票代码", "股票简称", "code"])
         self.assertEqual(parsed["text_answer"], "为您找到2条结果")
@@ -66,6 +67,7 @@ class TestParseRobotPayload(unittest.TestCase):
         )
         self.assertEqual(parsed["rows"], [])
         self.assertEqual(parsed["count"], 0)
+        self.assertIsNone(parsed["total"])
 
     def test_parser_ignores_malformed_items(self):
         payload = {
@@ -104,9 +106,10 @@ class TestQuery(unittest.TestCase):
     def test_query_orchestration_and_form(self):
         captured = {}
 
-        def fake_post(form, cookie=None):
+        def fake_post(session, form, cookie=None):
             captured["form"] = form
             captured["cookie"] = cookie
+            captured["session"] = session
             return _payload(
                 rows=[{"股票代码": "000099"}],
                 columns=["股票代码"],
@@ -123,11 +126,55 @@ class TestQuery(unittest.TestCase):
         self.assertEqual(captured["form"]["perpage"], "50")
         self.assertEqual(captured["form"]["page"], "1")
         self.assertEqual(captured["form"]["source"], "Ths_iwencai_Xuangu")
+        self.assertIsNotNone(captured["session"])
+        # 「共1条」不匹配「找到N条」格式 → total 留空，count 仍为本页行数
+        self.assertIsNone(result["total"])
+
+    def test_query_uses_single_session_for_token_and_post(self):
+        """回归：token 生成与 POST 必须复用同一个 session（cookie 才连续）。"""
+        created = []
+        token_sessions = []
+        posts = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return _payload()
+
+        class FakeSession:
+            def post(self, url, data=None, headers=None, timeout=None):
+                posts.append({"session": self, "headers": headers})
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        def factory():
+            session = FakeSession()
+            created.append(session)
+            return session
+
+        def fake_token(session):
+            token_sessions.append(session)
+            return "T"
+
+        with patch.object(wencai, "_session", side_effect=factory), patch.object(
+            wencai, "_hexin_token", side_effect=fake_token
+        ):
+            result = wencai.query("今日涨停")
+
+        self.assertEqual(result["question"], "今日涨停")
+        self.assertEqual(len(created), 1)
+        self.assertIs(token_sessions[0], created[0])
+        self.assertEqual(len(posts), 1)
+        self.assertIs(posts[0]["session"], created[0])
+        self.assertEqual(posts[0]["headers"]["hexin-v"], "T")
 
     def test_query_cookie_falls_back_to_env(self, ):
         captured = {}
 
-        def fake_post(form, cookie=None):
+        def fake_post(session, form, cookie=None):
             captured["cookie"] = cookie
             return _payload()
 
@@ -140,7 +187,7 @@ class TestQuery(unittest.TestCase):
     def test_query_explicit_cookie_beats_env(self):
         captured = {}
 
-        def fake_post(form, cookie=None):
+        def fake_post(session, form, cookie=None):
             captured["cookie"] = cookie
             return _payload()
 
@@ -153,7 +200,7 @@ class TestQuery(unittest.TestCase):
     def test_query_loads_cookie_from_dotenv_when_env_empty(self):
         captured = {}
 
-        def fake_post(form, cookie=None):
+        def fake_post(session, form, cookie=None):
             captured["cookie"] = cookie
             return _payload()
 
@@ -174,7 +221,7 @@ class TestQuery(unittest.TestCase):
                 os.environ["OMG_WENCAI_COOKIE"] = saved
         self.assertEqual(captured["cookie"], "dotenv=1")
 
-    def test_query_validates_question_and_perpage(self):
+    def test_query_validates_question_perpage_and_page(self):
         with self.assertRaises(ValueError):
             wencai.query("   ")
         with self.assertRaises(ValueError):
@@ -183,6 +230,99 @@ class TestQuery(unittest.TestCase):
             wencai.query("今日涨停", perpage=wencai.MAX_PERPAGE + 1)
         with self.assertRaises(ValueError):
             wencai.query("今日涨停", page=0)
+        with self.assertRaises(ValueError):
+            wencai.query("今日涨停", page=wencai.MAX_PAGE + 1)
+
+
+class TestTokenCache(unittest.TestCase):
+    def tearDown(self):
+        with wencai._TOKEN_LOCK:
+            wencai._TOKEN_CACHE.update(token=None, expires_at=0.0, cookies={})
+
+    def test_cached_token_reapplies_cookies_to_new_session(self):
+        import time
+
+        import requests
+
+        with wencai._TOKEN_LOCK:
+            wencai._TOKEN_CACHE.update(
+                token="T", expires_at=time.monotonic() + 60, cookies={"v": "abc"}
+            )
+        session = requests.Session()
+        try:
+            with patch.object(
+                wencai,
+                "_compute_token",
+                side_effect=AssertionError("缓存命中不应重新计算/打网络"),
+            ):
+                token = wencai._hexin_token(session)
+            self.assertEqual(token, "T")
+            self.assertEqual(session.cookies.get("v"), "abc")
+        finally:
+            session.close()
+
+    def test_fresh_token_saves_session_cookies(self):
+        import requests
+
+        session = requests.Session()
+
+        def fake_compute(sess):
+            sess.cookies.set("v", "xyz")
+            return "T2"
+
+        try:
+            with patch.object(wencai, "_compute_token", side_effect=fake_compute):
+                token = wencai._hexin_token(session)
+        finally:
+            session.close()
+        self.assertEqual(token, "T2")
+        with wencai._TOKEN_LOCK:
+            self.assertEqual(wencai._TOKEN_CACHE["cookies"], {"v": "xyz"})
+
+
+class TestServerTime(unittest.TestCase):
+    HOMEPAGE = "https://www.iwencai.com/unifiedwap/home/index"
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.status_code = 200
+            self.text = text
+
+    class FakeSession:
+        def __init__(self, homepage_html, scripts):
+            self.homepage_html = homepage_html
+            self.scripts = scripts
+            self.fetched = []
+
+        def get(self, url, timeout=None):
+            self.fetched.append(url)
+            if url == TestServerTime.HOMEPAGE:
+                return TestServerTime.FakeResponse(self.homepage_html)
+            return TestServerTime.FakeResponse(self.scripts.get(url, "no token"))
+
+    def test_prefers_chameleon_script_and_stops_at_hit(self):
+        html = (
+            '<script src="//cdn.example/a.js"></script>'
+            '<script src="//s.thsi.cn/js/chameleon/x.js"></script>'
+        )
+        session = self.FakeSession(
+            html, {"https://s.thsi.cn/js/chameleon/x.js": "var TOKEN_SERVER_TIME=123.45;"}
+        )
+        value = wencai._server_time(session)
+        self.assertEqual(value, "123.45")
+        # 首页之后先试 chameleon，命中即停，不再请求 a.js
+        self.assertEqual(session.fetched[1], "https://s.thsi.cn/js/chameleon/x.js")
+        self.assertEqual(len(session.fetched), 2)
+
+    def test_caps_script_fetches_when_nothing_matches(self):
+        scripts_html = "".join(
+            f'<script src="//cdn.example/s{i}.js"></script>' for i in range(12)
+        )
+        session = self.FakeSession(scripts_html, {})
+        with self.assertRaises(RuntimeError):
+            wencai._server_time(session)
+        # 首页 + 至多 _MAX_TOKEN_SCRIPT_FETCHES 个脚本
+        self.assertLessEqual(len(session.fetched), wencai._MAX_TOKEN_SCRIPT_FETCHES + 1)
 
 
 class TestPostFormErrors(unittest.TestCase):
@@ -209,33 +349,28 @@ class TestPostFormErrors(unittest.TestCase):
         return FakeSession()
 
     def test_403_mentions_cookie_fallback(self):
-        with patch.object(wencai, "_hexin_token", return_value="T"), patch.object(
-            wencai, "_session", return_value=self._fake_session(status_code=403)
-        ):
+        with patch.object(wencai, "_hexin_token", return_value="T"):
             with self.assertRaises(RuntimeError) as ctx:
-                wencai._post_form({"question": "x"})
+                wencai._post_form(
+                    self._fake_session(status_code=403), {"question": "x"}
+                )
         self.assertIn("OMG_WENCAI_COOKIE", str(ctx.exception))
 
     def test_non_json_raises_login_wall_hint(self):
-        with patch.object(wencai, "_hexin_token", return_value="T"), patch.object(
-            wencai, "_session", return_value=self._fake_session(payload=None)
-        ):
+        with patch.object(wencai, "_hexin_token", return_value="T"):
             with self.assertRaises(RuntimeError) as ctx:
-                wencai._post_form({"question": "x"})
+                wencai._post_form(self._fake_session(payload=None), {"question": "x"})
         self.assertIn("非 JSON", str(ctx.exception))
 
     def test_request_exception_wrapped(self):
         import requests
 
-        with patch.object(wencai, "_hexin_token", return_value="T"), patch.object(
-            wencai,
-            "_session",
-            return_value=self._fake_session(
-                raise_exc=requests.RequestException("boom")
-            ),
-        ):
+        with patch.object(wencai, "_hexin_token", return_value="T"):
             with self.assertRaises(RuntimeError) as ctx:
-                wencai._post_form({"question": "x"})
+                wencai._post_form(
+                    self._fake_session(raise_exc=requests.RequestException("boom")),
+                    {"question": "x"},
+                )
         self.assertIn("问财请求失败", str(ctx.exception))
 
 

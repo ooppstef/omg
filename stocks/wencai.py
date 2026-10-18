@@ -6,8 +6,9 @@
 3. POST unifiedwap/unified-wap/v2/result/get-robot-data（表单），解析
    answer 里 xuangu_table 组件的 columns/datas。
 
-说明：问财 2025 起收紧过策略（部分入口需登录 Cookie）。如遇 403/登录墙，
-可设置 OMG_WENCAI_COOKIE（浏览器登录后复制 Cookie 值）作为兜底。
+同一 session 贯穿 token 生成与查询，token 缓存同时保存该 session 的 cookie，
+以兼容未来「hexin-v 绑定 cookie」的反爬演进。如遇 403/登录墙，可设置
+OMG_WENCAI_COOKIE（浏览器登录后复制 Cookie 值）作为兜底。
 """
 
 from __future__ import annotations
@@ -28,10 +29,12 @@ _UA = (
 )
 _TIMEOUT_SECONDS = 20
 MAX_PERPAGE = 100
+MAX_PAGE = 50
 _TOKEN_TTL_SECONDS = 600
+_MAX_TOKEN_SCRIPT_FETCHES = 6
 
 _TOKEN_LOCK = threading.Lock()
-_TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
+_TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0, "cookies": {}}
 
 # 结果渲染时隐藏的列（问财表格里的辅助字段）
 _HIDDEN_COLUMNS = {"market_code"}
@@ -52,15 +55,23 @@ def _session():
 
 
 def _validate_page(name: str, value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} 必须为正整数")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_PAGE
+    ):
+        raise ValueError(f"{name} 必须在 1..{MAX_PAGE} 之间")
     return value
 
 
 # ---------------------------------------------------------------- token
 
 def _server_time(session) -> str:
-    """从问财首页的 chameleon 脚本里抽取 TOKEN_SERVER_TIME。"""
+    """从问财首页的 chameleon 脚本里抽取 TOKEN_SERVER_TIME。
+
+    优先下载文件名含 chameleon 的脚本（当前 token 所在），并限制尝试次数，
+    避免命中位置靠后时把页面外联 JS 逐个下载一遍。
+    """
     import requests
 
     try:
@@ -70,10 +81,15 @@ def _server_time(session) -> str:
     if resp.status_code != 200:
         raise RuntimeError(f"问财首页返回 HTTP {resp.status_code}")
     script_srcs = re.findall(r'<script[^>]*src="([^"]+)"', resp.text)
-    for src in script_srcs:
+    ordered = sorted(script_srcs, key=lambda src: 0 if "chameleon" in src else 1)
+    checked = 0
+    for src in ordered:
+        if checked >= _MAX_TOKEN_SCRIPT_FETCHES:
+            break
         if not (src.startswith("http") or src.startswith("//")):
             continue
         url = src if src.startswith("http") else f"https:{src}"
+        checked += 1
         try:
             js = session.get(url, timeout=_TIMEOUT_SECONDS).text
         except Exception:
@@ -96,8 +112,8 @@ def _hexin_js_path() -> Path:
     return path
 
 
-def _compute_token() -> str:
-    """本地计算 hexin-v；异常统一转成可读的 RuntimeError。"""
+def _compute_token(session) -> str:
+    """在给定 session 上计算 hexin-v（复用其 cookie）；异常统一转 RuntimeError。"""
     try:
         from py_mini_racer import MiniRacer
     except ImportError as exc:
@@ -106,12 +122,7 @@ def _compute_token() -> str:
             "或设置 OMG_WENCAI_COOKIE 走 Cookie 兜底"
         ) from exc
 
-    session = _session()
-    try:
-        server_time = _server_time(session)
-    finally:
-        session.close()
-
+    server_time = _server_time(session)
     code = (
         f"var TOKEN_SERVER_TIME={server_time};\n"
         + _hexin_js_path().read_text(encoding="utf-8")
@@ -127,17 +138,22 @@ def _compute_token() -> str:
     return token.strip()
 
 
-def _hexin_token() -> str:
+def _hexin_token(session) -> str:
+    """取 hexin-v；缓存同时保存生成时 session 的 cookie，命中缓存时回灌。"""
     now = time.monotonic()
     with _TOKEN_LOCK:
         token = _TOKEN_CACHE.get("token")
         expires_at = float(_TOKEN_CACHE.get("expires_at") or 0.0)
         if token and now < expires_at:
+            cookies = _TOKEN_CACHE.get("cookies") or {}
+            if cookies:
+                session.cookies.update(cookies)
             return token
-    token = _compute_token()
+    token = _compute_token(session)
     with _TOKEN_LOCK:
         _TOKEN_CACHE["token"] = token
         _TOKEN_CACHE["expires_at"] = time.monotonic() + _TOKEN_TTL_SECONDS
+        _TOKEN_CACHE["cookies"] = dict(session.cookies)
     return token
 
 
@@ -159,11 +175,10 @@ def _form(question: str, secondary_intent: str, page: int, perpage: int) -> dict
     }
 
 
-def _post_form(form: dict, cookie: Optional[str] = None) -> dict:
+def _post_form(session, form: dict, *, cookie: Optional[str] = None) -> dict:
     import requests
 
-    session = _session()
-    headers = {"hexin-v": _hexin_token()}
+    headers = {"hexin-v": _hexin_token(session)}
     if cookie:
         headers["Cookie"] = cookie
     try:
@@ -172,8 +187,6 @@ def _post_form(form: dict, cookie: Optional[str] = None) -> dict:
         )
     except requests.RequestException as exc:
         raise RuntimeError(f"问财请求失败: {exc}") from exc
-    finally:
-        session.close()
 
     if resp.status_code == 403:
         raise RuntimeError(
@@ -233,11 +246,18 @@ def _parse_robot_payload(payload: dict) -> dict:
             ]
             rows = [row for row in datas if isinstance(row, dict)]
 
+    # 命中总数只在摘要文案里（如「为你找到61条结果」）；count 仅是本页行数
+    total = None
+    match = re.search(r"找到\s*(\d+)\s*条", text_answer)
+    if match:
+        total = int(match.group(1))
+
     return {
         "text_answer": text_answer,
         "columns": columns,
         "rows": rows,
         "count": len(rows),
+        "total": total,
     }
 
 
@@ -277,10 +297,15 @@ def query(
     ):
         raise ValueError(f"perpage 必须在 1..{MAX_PERPAGE} 之间")
 
-    payload = _post_form(
-        _form(text, secondary_intent, page, perpage),
-        cookie=_resolve_cookie(cookie),
-    )
+    session = _session()
+    try:
+        payload = _post_form(
+            session,
+            _form(text, secondary_intent, page, perpage),
+            cookie=_resolve_cookie(cookie),
+        )
+    finally:
+        session.close()
     parsed = _parse_robot_payload(payload)
     return {
         "question": text,

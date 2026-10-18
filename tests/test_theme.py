@@ -125,6 +125,10 @@ class TestFetchEndpoints(unittest.TestCase):
             theme.hot_themes(page_size=theme.MAX_THEME_COUNT + 1)
         with self.assertRaises(ValueError):
             theme.hot_themes(page=0)
+        with self.assertRaises(ValueError):
+            theme.hot_themes(page=theme.MAX_PAGE + 1)
+        with self.assertRaises(ValueError):
+            theme.hot_stocks(page=theme.MAX_PAGE + 1)
 
 
 class TestFetchErrors(unittest.TestCase):

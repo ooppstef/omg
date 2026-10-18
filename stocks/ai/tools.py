@@ -365,16 +365,33 @@ def _tool_theme(args: dict) -> dict:
         elif mode == "style":
             data = theme.market_style()
         else:
-            data = {
-                "today": theme.today_opportunity(),
-                "recent": theme.recent_hot(),
-                "themes": theme.hot_themes(
-                    page_size=theme.DEFAULT_THEME_COUNT
-                )["rows"],
-                "stocks": theme.hot_stocks(
-                    page_size=theme.DEFAULT_STOCK_COUNT
-                )["rows"],
-            }
+            data = {}
+            errors: list[str] = []
+
+            def load(key: str, fetch) -> None:
+                try:
+                    data[key] = fetch()
+                except Exception as exc:  # 单节失败不拖垮其余来源
+                    errors.append(f"{key}: {exc}")
+
+            load("today", theme.today_opportunity)
+            load("recent", theme.recent_hot)
+            load(
+                "themes",
+                lambda: theme.hot_themes(page_size=theme.DEFAULT_THEME_COUNT)[
+                    "rows"
+                ],
+            )
+            load(
+                "stocks",
+                lambda: theme.hot_stocks(page_size=theme.DEFAULT_STOCK_COUNT)[
+                    "rows"
+                ],
+            )
+            if not data:
+                return _err("题材库全部来源失败：" + "；".join(errors))
+            if errors:
+                data["errors"] = errors
     return _ok(data)
 
 
@@ -698,7 +715,8 @@ def schemas() -> list[dict]:
                 "name": "theme",
                 "description": (
                     "东财题材库（主题投资）：今日机会（题材+入选理由+关联标的）/ 近期热点 / 热门主题榜（按当日涨幅，含领涨股）/ "
-                    "个股风向标（入选原因）/ 市场风格。编辑与热度口径，补充主题研究上下文，非预测"
+                    "个股风向标（入选原因）/ 市场风格。编辑与热度口径，补充主题研究上下文，非预测；"
+                    "all 模式个别来源失败时以 errors 列出，其余照常返回"
                 ),
                 "parameters": {
                     "type": "object",
@@ -724,7 +742,8 @@ def schemas() -> list[dict]:
                 "name": "wencai",
                 "description": (
                     "问财（同花顺）自然语言查询：如「今日涨停的股票」「XX概念成分股」「昨日炸板的股票」；"
-                    "列名为动态中文列（含涨停原因/几天几板等字段）。查证题材成分、连板梯队时优先于 web_search；非投资建议"
+                    "列名为动态中文列（含涨停原因/几天几板等字段）；count=本页行数、total=命中总数（可能为 null）。"
+                    "查证题材成分、连板梯队时优先于 web_search；非投资建议"
                 ),
                 "parameters": {
                     "type": "object",

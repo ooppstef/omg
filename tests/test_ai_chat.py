@@ -176,6 +176,37 @@ class TestTools(unittest.TestCase):
         self.assertTrue(result["ok"])
         mock_hot.assert_called_once_with(page_size=10)
 
+    def test_theme_all_mode_degrades_per_section(self):
+        with patch(
+            "stocks.theme.today_opportunity", return_value=[{"CategoryName": "军工"}]
+        ), patch(
+            "stocks.theme.recent_hot", side_effect=RuntimeError("boom")
+        ), patch(
+            "stocks.theme.hot_themes",
+            return_value={"rows": [{"CategoryName": "低空"}]},
+        ), patch(
+            "stocks.theme.hot_stocks", return_value={"rows": []}
+        ):
+            result = ai_tools.call("theme", {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["today"][0]["CategoryName"], "军工")
+        self.assertEqual(result["data"]["themes"][0]["CategoryName"], "低空")
+        self.assertIn("recent", result["data"]["errors"][0])
+
+    def test_theme_all_mode_total_failure_is_error(self):
+        with patch(
+            "stocks.theme.today_opportunity", side_effect=RuntimeError("a")
+        ), patch(
+            "stocks.theme.recent_hot", side_effect=RuntimeError("b")
+        ), patch(
+            "stocks.theme.hot_themes", side_effect=RuntimeError("c")
+        ), patch(
+            "stocks.theme.hot_stocks", side_effect=RuntimeError("d")
+        ):
+            result = ai_tools.call("theme", {})
+        self.assertFalse(result["ok"])
+        self.assertIn("全部来源失败", result["error"])
+
     @patch(
         "stocks.wencai.query",
         return_value={"rows": [{"股票代码": "000099"}], "text_answer": "", "count": 1},

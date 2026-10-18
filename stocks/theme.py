@@ -22,6 +22,7 @@ DEFAULT_THEME_COUNT = 20
 MAX_THEME_COUNT = 50
 DEFAULT_STOCK_COUNT = 10
 MAX_STOCK_COUNT = 30
+MAX_PAGE = 100
 
 _ORDER_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 
@@ -45,6 +46,16 @@ def _validate_n(name: str, value: int, maximum: int) -> int:
         raise ValueError(f"{name} 必须是整数")
     if not 1 <= value <= maximum:
         raise ValueError(f"{name} 必须在 1..{maximum} 之间")
+    return value
+
+
+def _validate_page(name: str, value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_PAGE
+    ):
+        raise ValueError(f"{name} 必须在 1..{MAX_PAGE} 之间")
     return value
 
 
@@ -125,8 +136,7 @@ def recent_hot() -> list[dict]:
 def hot_themes(page: int = 1, page_size: int = DEFAULT_THEME_COUNT) -> dict:
     """全部题材按当日涨幅排序（含父级分类与领涨股）。"""
     page_size = _validate_n("page_size", page_size, MAX_THEME_COUNT)
-    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
-        raise ValueError("page 必须为正整数")
+    page = _validate_page("page", page)
     payload = _fetch(
         "hottheme",
         {"startIndex": (page - 1) * page_size + 1, "pageSize": page_size},
@@ -147,8 +157,7 @@ def hot_stocks(
 ) -> dict:
     """个股风向标（入选原因 + 现价/涨跌幅）。"""
     page_size = _validate_n("page_size", page_size, MAX_STOCK_COUNT)
-    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
-        raise ValueError("page 必须为正整数")
+    page = _validate_page("page", page)
     field = (order_field or "Pchg").strip() or "Pchg"
     if not _ORDER_FIELD_RE.match(field):
         raise ValueError("order_field 仅支持字母/数字/下划线（不超过 32 字符）")
