@@ -82,7 +82,7 @@ class TestTools(unittest.TestCase):
         names = {s["function"]["name"] for s in ai_tools.schemas()}
         self.assertEqual(
             names,
-            {"mood", "style", "rot", "crowd", "etf", "hot", "strength", "list", "rank", "watch_advice", "web_search"},
+            {"mood", "style", "rot", "crowd", "etf", "hot", "strength", "list", "rank", "theme", "wencai", "watch_advice", "web_search"},
         )
 
     def test_unknown_tool(self):
@@ -154,6 +154,42 @@ class TestTools(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("gainers", result["error"])
         mock_analyze.assert_not_called()
+
+    @patch("stocks.theme.today_opportunity", return_value=[{"CategoryName": "军工"}])
+    def test_theme_tool_today_mode(self, mock_today):
+        result = ai_tools.call("theme", {"mode": "today"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["today"][0]["CategoryName"], "军工")
+        mock_today.assert_called_once_with()
+
+    def test_theme_tool_rejects_bad_mode(self):
+        result = ai_tools.call("theme", {"mode": "bogus"})
+        self.assertFalse(result["ok"])
+        self.assertIn("mode", result["error"])
+
+    def test_theme_tool_stocks_mode_defaults_top_ten(self):
+        with patch(
+            "stocks.theme.hot_stocks",
+            return_value={"rows": [], "total_pages": 0},
+        ) as mock_hot:
+            result = ai_tools.call("theme", {"mode": "stocks"})
+        self.assertTrue(result["ok"])
+        mock_hot.assert_called_once_with(page_size=10)
+
+    @patch(
+        "stocks.wencai.query",
+        return_value={"rows": [{"股票代码": "000099"}], "text_answer": "", "count": 1},
+    )
+    def test_wencai_tool(self, mock_query):
+        result = ai_tools.call("wencai", {"question": "今日涨停", "perpage": 50})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["count"], 1)
+        mock_query.assert_called_once_with("今日涨停", page=1, perpage=50)
+
+    def test_wencai_tool_requires_question(self):
+        result = ai_tools.call("wencai", {})
+        self.assertFalse(result["ok"])
+        self.assertIn("question", result["error"])
 
     def test_watch_advice_rejects_non_boolean_skip_board(self):
         with patch("stocks.watch_advice.analyze") as mock_analyze:

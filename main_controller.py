@@ -15,6 +15,7 @@ COMMAND_META = {
     "etf": ("etf", "主题ETF点评"),
     "mood": ("mood", "市场情绪"),
     "style": ("style", "风格结构"),
+    "theme": ("theme", "题材库（东财主题投资）"),
     "chat": (None, "AI多轮对话"),
 }
 COMMANDS = tuple(COMMAND_META)
@@ -106,9 +107,41 @@ def _run_chat(argv):
     return chat_run(prompt=first, research=research, skill=skill)
 
 
+def _run_wencai(argv):
+    parser = argparse.ArgumentParser(
+        prog="omg wencai",
+        description="问财（同花顺）自然语言查询，如：omg wencai 今日涨停",
+    )
+    parser.add_argument("--page", type=int, default=1, help="页码，默认 1")
+    parser.add_argument(
+        "--perpage", type=int, default=100, help="每页条数 1..100，默认 100"
+    )
+    parser.add_argument("question", nargs="*", help="查询语句")
+    args = parser.parse_args(argv)
+
+    question = " ".join(args.question).strip()
+    if not question:
+        parser.print_usage()
+        print('示例: omg wencai "今日涨停"')
+        return 2
+
+    from stocks import wencai as wencai_mod
+
+    try:
+        result = wencai_mod.query(question, page=args.page, perpage=args.perpage)
+    except Exception as exc:
+        print(f"问财查询失败: {exc}")
+        return 1
+    wencai_mod.print_query_result(result)
+    return 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "chat":
         return _run_chat(sys.argv[2:])
+
+    if len(sys.argv) > 1 and sys.argv[1] == "wencai":
+        return _run_wencai(sys.argv[2:])
 
     parser = argparse.ArgumentParser(description="基本命令")
     parser.add_argument(
@@ -128,7 +161,9 @@ def main():
     args = parser.parse_args()
 
     if not args.k and not args.command:
-        print(f"用法: omg [{'|'.join(COMMANDS)}] 或 omg -k 概念名称")
+        print(
+            f"用法: omg [{'|'.join(COMMANDS)}] 或 omg -k 概念名称 或 omg wencai \"查询\""
+        )
         return 2
 
     if args.command == "chat":

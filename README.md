@@ -22,7 +22,16 @@ omg chat
 
 启动对话，直接问行情相关问题，结论来自本地 tools 取证。
 
-### 3. 内置 skills：自动加载 / 手动加载
+### 3. 题材库与问财
+
+```sh
+omg theme                 # 东财题材库：今日机会 / 近期热点 / 热门主题 / 个股风向标
+omg wencai "今日涨停"      # 问财自然语言查询（同花顺），如 概念成分 / 连板梯队
+```
+
+问财默认匿名访问；若触发限流或登录墙，可在 `.env` 配置 `OMG_WENCAI_COOKIE`（浏览器登录后复制 Cookie）兜底。
+
+### 4. 内置 skills：自动加载 / 手动加载
 
 内置 skills 随项目分发在 `stocks/ai/bundled_skills/`（`omg-daily-review` 日复盘、`omg-theme-research` 主题研究）。加载方式有两种：
 
@@ -43,7 +52,7 @@ omg chat --skill omg-daily-review      # 强制挂载日复盘
 omg chat --skill omg-theme-research    # 强制挂载主题研究
 ```
 
-两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / list / rank / watch_advice），并同时打开 research（更多 tool 预算）；最终输出结构化的：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 底部启动 / 推荐关注 / 风险 / 建议。
+两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / list / rank / theme / wencai / watch_advice），并同时打开 research（更多 tool 预算）；最终输出结构化的：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 底部启动 / 推荐关注 / 风险 / 建议。
 
 ## 安装
 

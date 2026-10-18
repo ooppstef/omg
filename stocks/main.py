@@ -8,6 +8,7 @@ import stocks.crowd as crowd_ana
 import stocks.etf as etf_ana
 import stocks.mood as mood_ana
 import stocks.style as style_ana
+import stocks.theme as theme_ana
 import stocks.filter.entry as stock_filter
 from stocks.filter.algo import STRATEGIES
 
@@ -77,6 +78,11 @@ def style():
     """风格结构（大小盘/科技/红利）"""
     result = style_ana.analyze()
     return bool(result.get("features", {}).get("ok"))
+
+
+def theme():
+    """东财题材库（今日机会/近期热点/热门主题/个股风向标）"""
+    return bool(theme_ana.print_theme_report())
 
 
 def init_data():

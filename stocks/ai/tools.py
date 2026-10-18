@@ -340,6 +340,59 @@ def _tool_watch_advice(args: dict) -> dict:
     return _ok(data)
 
 
+def _tool_theme(args: dict) -> dict:
+    import stocks.theme as theme
+
+    mode = str(args.get("mode") or "all").strip().lower()
+    if mode not in {"all", "today", "recent", "themes", "stocks", "style"}:
+        raise ValueError("mode 仅支持 all/today/recent/themes/stocks/style")
+    top = None
+    if mode in {"themes", "stocks"}:
+        default = (
+            theme.DEFAULT_THEME_COUNT if mode == "themes" else theme.DEFAULT_STOCK_COUNT
+        )
+        maximum = theme.MAX_THEME_COUNT if mode == "themes" else theme.MAX_STOCK_COUNT
+        top = _int_arg(args, "top", default, maximum)
+    with _quiet():
+        if mode == "today":
+            data: Any = {"today": theme.today_opportunity()}
+        elif mode == "recent":
+            data = {"recent": theme.recent_hot()}
+        elif mode == "themes":
+            data = theme.hot_themes(page_size=top)
+        elif mode == "stocks":
+            data = theme.hot_stocks(page_size=top)
+        elif mode == "style":
+            data = theme.market_style()
+        else:
+            data = {
+                "today": theme.today_opportunity(),
+                "recent": theme.recent_hot(),
+                "themes": theme.hot_themes(
+                    page_size=theme.DEFAULT_THEME_COUNT
+                )["rows"],
+                "stocks": theme.hot_stocks(
+                    page_size=theme.DEFAULT_STOCK_COUNT
+                )["rows"],
+            }
+    return _ok(data)
+
+
+def _tool_wencai(args: dict) -> dict:
+    import stocks.wencai as wencai
+
+    question = str(args.get("question") or "").strip()
+    if not question:
+        return _err("question 不能为空")
+    page = _int_arg(args, "page", 1, 50)
+    perpage = _int_arg(args, "perpage", wencai.MAX_PERPAGE, wencai.MAX_PERPAGE)
+    with _quiet():
+        data = wencai.query(question, page=page, perpage=perpage)
+    if not data.get("rows") and not data.get("text_answer"):
+        return _err("问财未返回可用结果")
+    return _ok(data)
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "mood": _tool_mood,
     "style": _tool_style,
@@ -350,6 +403,8 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "strength": _tool_strength,
     "list": _tool_list,
     "rank": _tool_rank,
+    "theme": _tool_theme,
+    "wencai": _tool_wencai,
     "watch_advice": _tool_watch_advice,
     "web_search": _tool_web_search,
 }
@@ -357,7 +412,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
 # 短时缓存只读行情 tools，避免同一轮复盘重复拉数；不能按整日缓存，
 # 否则早盘快照会一直冒充收盘数据。
 _CACHEABLE_TOOLS = frozenset(
-    {"mood", "style", "rot", "crowd", "etf", "hot", "strength"}
+    {"mood", "style", "rot", "crowd", "etf", "hot", "strength", "theme", "wencai"}
 )
 _DEFAULT_CACHE_TTL_SECONDS = 300
 _TOOL_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
@@ -634,6 +689,61 @@ def schemas() -> list[dict]:
                             "maximum": 50,
                         },
                     },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "theme",
+                "description": (
+                    "东财题材库（主题投资）：今日机会（题材+入选理由+关联标的）/ 近期热点 / 热门主题榜（按当日涨幅，含领涨股）/ "
+                    "个股风向标（入选原因）/ 市场风格。编辑与热度口径，补充主题研究上下文，非预测"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "description": "all/today/recent/themes/stocks/style，默认 all",
+                            "enum": ["all", "today", "recent", "themes", "stocks", "style"],
+                        },
+                        "top": {
+                            "type": "integer",
+                            "description": "themes/stocks 模式的返回条数（themes 默认 20、stocks 默认 10）；all 模式固定 20/10",
+                            "minimum": 1,
+                            "maximum": 50,
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "wencai",
+                "description": (
+                    "问财（同花顺）自然语言查询：如「今日涨停的股票」「XX概念成分股」「昨日炸板的股票」；"
+                    "列名为动态中文列（含涨停原因/几天几板等字段）。查证题材成分、连板梯队时优先于 web_search；非投资建议"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "自然语言查询语句"},
+                        "page": {
+                            "type": "integer",
+                            "description": "页码，默认 1",
+                            "minimum": 1,
+                            "maximum": 50,
+                        },
+                        "perpage": {
+                            "type": "integer",
+                            "description": "每页条数，默认 100",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
+                    },
+                    "required": ["question"],
                 },
             },
         },

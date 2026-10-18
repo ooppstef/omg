@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Iterator, Optional
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,40 @@ _DIRECT_HTTP_USERS = 0
 _DIRECT_HTTP_ORIGINAL_REQUEST = None
 _DIRECT_HTTP_TIMEOUT_SECONDS = 15
 _MARKET_TZ = ZoneInfo("Asia/Shanghai")
+_DOTENV_LOADED = False
+
+
+def load_dotenv() -> None:
+    """加载仓库根目录 .env；已存在的环境变量优先，不被覆盖。
+
+    测试或显式禁用（OMG_DISABLE_DOTENV）时跳过，避免 clear=True 后被 .env 重新注入。
+    """
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    if (os.getenv("OMG_DISABLE_DOTENV") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+    path = Path(__file__).resolve().parents[1] / ".env"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("'").strip('"')
 
 
 def env_int(name: str, default: int) -> int:
