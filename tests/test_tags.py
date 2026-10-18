@@ -1,6 +1,5 @@
 """stocks.tags 会话级缓存与标签服务单测（mock 网络，不打真实请求）。"""
 
-import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor

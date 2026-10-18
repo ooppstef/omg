@@ -21,16 +21,3 @@ def clean_numeric(series) -> pd.Series:
     """数值化并清除 inf/NaN；不可转数值的变 NaN。"""
     out = pd.to_numeric(series, errors="coerce")
     return out.replace([math.inf, -math.inf], pd.NA)
-
-
-def normalize_date_col(frame: pd.DataFrame, col: str = "trade_date") -> pd.DataFrame:
-    """把日期列规范为 %Y-%m-%d 字符串，剔除无效日期行。"""
-    if frame is None or frame.empty or col not in frame.columns:
-        return frame
-    parsed = parse_date_series(frame[col])
-    valid = parsed.notna()
-    if not valid.any():
-        return frame.iloc[0:0].copy()
-    out = frame.loc[valid].copy()
-    out[col] = parsed.loc[valid].dt.strftime("%Y-%m-%d")
-    return out

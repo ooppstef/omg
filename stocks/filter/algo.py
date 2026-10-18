@@ -50,34 +50,6 @@ TREND_PULLBACK_RULES = {
 }
 
 
-def trend_pullback_ctx():
-    """返回当前趋势回调企稳策略的关键阈值，供验证脚本复用。"""
-    keys = (
-        "adx_min",
-        "days_since_peak_min",
-        "days_since_peak_max",
-        "drawdown_atr_min",
-        "drawdown_atr_max",
-        "dryup_ratio_max",
-        "distribution_days_max",
-        "close_vs_ma20_min",
-        "close_vs_ma20_floor",
-        "rv20_repair_min",
-        "rv20_trigger_min",
-        "close_loc_trigger_min",
-    )
-    ctx = {key: TREND_PULLBACK_RULES[key] for key in keys}
-    ctx.update(
-        {
-            "clear_uptrend": CLEAR_UPTREND_RULES.copy(),
-            "state_machine": ("trend", "pullback", "trigger"),
-            "min_price": 5.0,
-            "meme_limit_up_max": 2,
-        }
-    )
-    return ctx
-
-
 # ---------- 止跌形态检测 ----------
 
 
@@ -652,12 +624,3 @@ def trend_pullback(code, df):
 STRATEGIES = {
     "1": ("趋势回调企稳", trend_pullback),
 }
-
-
-# 兼容旧名字，避免外部脚本断掉
-get_trend_pullback_review_context = trend_pullback_ctx
-_detect_stabilization_signal = _pick_signal
-_evaluate_trend_state = _trend_state
-_evaluate_pullback_state = _pullback_state
-_evaluate_trigger_state = _trigger_state
-strategy_trend_pullback_stabilize = trend_pullback

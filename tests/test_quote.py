@@ -5,7 +5,7 @@ import unittest
 
 import pandas as pd
 
-from stocks.quote import clean_numeric, normalize_date_col, parse_date_series
+from stocks.quote import clean_numeric, parse_date_series
 
 
 class TestParseDateSeries(unittest.TestCase):
@@ -48,28 +48,6 @@ class TestCleanNumeric(unittest.TestCase):
 
     def test_empty_series(self):
         self.assertTrue(clean_numeric(pd.Series(dtype=float)).empty)
-
-
-class TestNormalizeDateCol(unittest.TestCase):
-    def test_normalizes_and_drops_invalid_rows(self):
-        frame = pd.DataFrame({"trade_date": ["2026-07-21", "bad", "2026-07-22"], "v": [1, 2, 3]})
-        out = normalize_date_col(frame)
-        self.assertEqual(out["trade_date"].tolist(), ["2026-07-21", "2026-07-22"])
-        self.assertEqual(out["v"].tolist(), [1, 3])
-
-    def test_all_invalid_returns_empty(self):
-        frame = pd.DataFrame({"trade_date": ["bad", "worse"], "v": [1, 2]})
-        self.assertTrue(normalize_date_col(frame).empty)
-
-    def test_none_and_missing_col(self):
-        self.assertIsNone(normalize_date_col(None))
-        frame = pd.DataFrame({"other": [1]})
-        self.assertIs(frame, normalize_date_col(frame))
-
-    def test_does_not_mutate_input(self):
-        frame = pd.DataFrame({"trade_date": ["2026-07-21"], "v": [1]})
-        normalize_date_col(frame)
-        self.assertEqual(frame["trade_date"].tolist(), ["2026-07-21"])
 
 
 if __name__ == "__main__":

@@ -89,10 +89,6 @@ def _num(row: dict, *keys: str, default: float = 0.0) -> float:
     return default
 
 
-def _int(row: dict, *keys: str, default: int = 0) -> int:
-    return int(_num(row, *keys, default=float(default)))
-
-
 def _board_count(row: dict, *keys: str) -> Optional[int]:
     for key in keys:
         value = finite_float(row.get(key))

@@ -265,18 +265,6 @@ def fetch_board_frame(
     return em
 
 
-def fetch_concept_frame(index_code: str, start_date: str) -> pd.DataFrame:
-    """兼容旧名。"""
-    return fetch_board_frame(index_code, start_date)
-
-
-def fetch_concept_amount(index_code: str, start_date: str) -> pd.Series:
-    frame = fetch_board_frame(index_code, start_date)
-    if frame.empty:
-        return pd.Series(dtype=float)
-    return frame.set_index("trade_date")["amount"].sort_index()
-
-
 def _list_em_industries() -> dict:
     """东财全部行业板块 name -> BK 代码（转发 tags 缓存服务）。"""
     return tags.em_industries()
@@ -424,11 +412,6 @@ def compute_board_crowding(
         "amount_source": frame.attrs.get("amount_source"),
         **base,
     }
-
-
-def compute_concept_crowding(index_code: str, concept_name: str, market_amount: pd.Series) -> dict:
-    """兼容旧名。"""
-    return compute_board_crowding(index_code, concept_name, market_amount)
 
 
 def rank_crowding_rows(rows: list, top: int = 15) -> list:

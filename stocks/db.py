@@ -152,38 +152,6 @@ def search_base_by_code(code):
     return _query_one("SELECT * FROM Base WHERE code = ?", (code,))
 
 
-def search_base_by_short(short):
-    short = short.upper()
-    return _query_one("SELECT * FROM Base WHERE short = ?", (short,))
-
-
-def search_base_by_shorts(shorts):
-    shorts = [short.upper() for short in shorts]
-    if not shorts:
-        return []
-    placeholders = ", ".join(["?" for _ in shorts])
-    # The interpolated fragment contains only generated "?" placeholders.
-    query = (
-        f"SELECT * FROM Base WHERE short IN ({placeholders})"  # nosec
-    )
-    return _query_all(query, shorts)
-
-
-def search_base_by_name(name):
-    return _query_one("SELECT * FROM Base WHERE name = ?", (name,))
-
-
-def search_base_by_names(names):
-    if not names:
-        return []
-    placeholders = ", ".join(["?" for _ in names])
-    # The interpolated fragment contains only generated "?" placeholders.
-    query = (
-        f"SELECT * FROM Base WHERE name IN ({placeholders})"  # nosec
-    )
-    return _query_all(query, names)
-
-
 def search_base_by_names_like(names):
     if isinstance(names, str):
         names = [names]

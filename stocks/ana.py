@@ -348,7 +348,7 @@ def concept_strength_chart(concept_names, days=10):
         return None
     
     # 绘图
-    fig, ax = plt.subplots(figsize=(12, 6))
+    _, ax = plt.subplots(figsize=(12, 6))
     colors = ['#E53935', '#1E88E5', '#43A047', '#FB8C00', '#8E24AA', '#00ACC1']
     
     for i, (name, strengths) in enumerate(all_series.items()):

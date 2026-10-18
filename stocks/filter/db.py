@@ -73,7 +73,8 @@ def _quote_table_name(table):
 
 
 def _update_lock_path():
-    return str(data_file("stocks.update.lock"))
+    """换表锁文件路径；锁实现与测试共用同一来源。"""
+    return data_file("stocks.update.lock")
 
 
 @contextmanager
@@ -89,7 +90,7 @@ def _update_lock():
                 _UPDATE_LOCK_STATE.depth -= 1
             return
 
-        with exclusive_file_lock(data_file("stocks.update.lock")):
+        with exclusive_file_lock(_update_lock_path()):
             _UPDATE_LOCK_STATE.depth = 1
             try:
                 yield
