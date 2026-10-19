@@ -118,6 +118,7 @@ def _tech_snapshot(df: pd.DataFrame) -> dict[str, Any]:
             snap[key] = None
             continue
         snap[key] = finite_float(last.get(key))
+    snap["prev_macd_hist"] = finite_float(out.iloc[-2].get("macd_hist"))
     close = snap.get("close")
     for ma_key in ("ma5", "ma10", "ma20", "ma60"):
         ma = snap.get(ma_key)

@@ -9,6 +9,8 @@
 import math
 import talib
 
+from stocks.universe import GROWTH_BOARD_CODE_PREFIXES
+
 
 def _nan(val):
     if val is None:
@@ -185,6 +187,7 @@ def _has_clear_uptrend(df):
 
     start_idx = max(0, peak_idx - CLEAR_UPTREND_RULES["lookback"])
     seg = data.iloc[start_idx : peak_idx + 1]
+    seg = data.iloc[seg["low"].idxmin() : peak_idx + 1]
     rally_low = float(seg["low"].min())
     if rally_low <= 0:
         return False
@@ -572,9 +575,10 @@ def trend_pullback(code, df):
     if close < 5.0:
         return None
 
-    # 妖股过滤：近15日内不能有 ≥2 个涨停板
+    # 近 15 日内不能有 ≥2 个近涨停日，创业板/科创板按 20% 口径。
     recent_15 = df["change_pct"].iloc[-15:]
-    if (recent_15 >= 9.5).sum() >= 2:
+    limit_threshold = 19.5 if str(code).startswith(GROWTH_BOARD_CODE_PREFIXES) else 9.5
+    if (recent_15 >= limit_threshold).sum() >= 2:
         return None
 
     signal = _pick_signal(df)

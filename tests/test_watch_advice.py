@@ -91,6 +91,12 @@ class TestWatchAdviceHelpers(unittest.TestCase):
         self.assertIsNone(watch_advice._vol_stance(None))
         self.assertIsNone(watch_advice._vol_stance(float("inf")))
 
+    def test_tech_snapshot_preserves_previous_macd_for_cross_detection(self):
+        frame = _fake_ohlcv()
+        today = watch_advice._tech_snapshot(frame)
+        yesterday = watch_advice._tech_snapshot(frame.iloc[:-1])
+        self.assertAlmostEqual(today["prev_macd_hist"], yesterday["macd_hist"])
+
     def test_hot_score_map_rejects_nonfinite_scores(self):
         scores = watch_advice._build_hot_score_map(
             {"2026-07-21": [("有效", 1.0), ("无效", float("inf"))]}

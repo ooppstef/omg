@@ -151,6 +151,50 @@ class TestCoverage(unittest.TestCase):
 
 
 class TestBatchFetch(unittest.TestCase):
+    def test_adjusted_overlap_refreshes_the_whole_stock_history(self):
+        def quote(day, price):
+            return ("600001", day, price, price, price, price, 100, 1000, 0, 1)
+
+        old = [quote(f"2026-07-{day}", 10.0) for day in (14, 15, 16)]
+        updated = [quote(f"2026-07-{day}", 5.0) for day in (14, 15, 16, 17)]
+        for refresh in (updated, [], updated[-2:]):
+            with self.subTest(refresh_rows=len(refresh)):
+                conn = sqlite3.connect(":memory:")
+                try:
+                    conn.execute(db.DDL)
+                    conn.executemany("INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)", old)
+                    with patch.object(db, "_fetch_one", side_effect=[
+                        ("600001", updated[-2:], None), ("600001", refresh, None)
+                    ]) as fetch:
+                        ok, fail, _ = db._batch_fetch(
+                            ["600001"], "2026-07-16", conn, "DailyQuote", "更新", False
+                        )
+                    actual = conn.execute("SELECT * FROM DailyQuote ORDER BY trade_date").fetchall()
+                    if refresh == updated:
+                        self.assertEqual(actual, updated)
+                        self.assertEqual((ok, fail), (1, 0))
+                    else:
+                        self.assertEqual(actual, old)
+                        self.assertEqual((ok, fail), (0, 1))
+                    self.assertEqual(fetch.call_args_list, [
+                        unittest.mock.call("600001", "2026-07-16"),
+                        unittest.mock.call("600001", "2026-07-14"),
+                    ])
+                finally:
+                    conn.close()
+
+    def test_incremental_fetch_overlaps_each_stocks_own_latest_date(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(db.DDL)
+            row = ("600001", "2026-07-14", 10, 10, 10, 10, 100, 1000, 0, 1)
+            conn.execute("INSERT INTO DailyQuote VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+            with patch.object(db, "_fetch_one", return_value=("600001", [row], None)) as fetch:
+                db._batch_fetch(["600001"], "2026-07-16", conn, "DailyQuote", "更新", False)
+            fetch.assert_called_once_with("600001", "2026-07-14")
+        finally:
+            conn.close()
+
     @patch("stocks.filter.db.adata.stock.market.get_market")
     def test_fetch_one_rejects_invalid_ohlcv_rows(self, get_market):
         get_market.return_value = pd.DataFrame(

@@ -69,7 +69,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from stocks.universe import A_SHARE_CODE_PREFIXES
+from stocks.universe import A_SHARE_CODE_PREFIXES, GROWTH_BOARD_CODE_PREFIXES
 from stocks.util import finite_float
 
 # ---------------------------------------------------------------- 标签常量
@@ -106,14 +106,14 @@ _STOCK_STAGE_WARM = 3.0
 _STOCK_STAGE_FADE = 0.0
 _STOCK_STAGE_EBB = -5.0
 
-# 市场结构判定规则（经验阈值；调阈值需同步更新测试与文档）
+# 市场结构判定规则（v2；收益离散度用百分点，占比用小数）
 _REGIME_RULES = {
     "down_up_ratio": 0.25,        # 5日上涨概念占比 ≤ 此值
-    "down_dispersion": 0.03,      # 且 Top十分位 − 中位数 ≤ 此值（无强势簇）
+    "down_dispersion": 3.0,       # Top十分位 − 中位数 < 3pp 时无明显强势簇
     "defensive_up_ratio": 0.30,   # 风格偏防御且上涨概念占比 ≤ 此值
     "huddle_narrow": 0.15,        # 龙头独拉板块占比 ≥ 此值
     "huddle_hhi": 0.06,           # 或涨停行业 HHI ≥ 此值
-    "huddle_dispersion": 0.06,    # 或 Top十分位 − 中位数 ≥ 此值（pp）
+    "huddle_dispersion": 6.0,     # 或 Top十分位 − 中位数 ≥ 6pp
     "huddle_up_ratio": 0.50,      # 且 5日上涨概念占比 ≤ 此值
     "broad_up_ratio": 0.60,       # 5日上涨概念占比 ≥ 此值
     "broad_wide": 0.30,           # 且宽度扩散板块占比 ≥ 此值
@@ -224,7 +224,6 @@ _ABNORMAL_DEV_10D = 100.0
 _NEAR_ABNORMAL_RATIO = 0.7
 _HIGH_STREAK = 5  # 连板高度 ≥5：高度与停牌核查风险显著，追高性价比下降
 _BREAKDOWN_CHANGE = -9.0  # 当日跌幅 ≤ 此值（近跌停）：直接判技术面走坏
-_GEM_PREFIXES = ("300", "301", "302", "688")
 
 # 回落性质（纯技术面/量价；逻辑面须用最新外部信息核实，见 _NOTES）
 _PULLBACK_DROP = -3.0  # 当日跌幅门槛：视为「回落」
@@ -262,12 +261,13 @@ _CANDIDATE_WEIGHTS = (
     ("vol_ratio", 0.20),
 )
 
-# 个股强度权重（相对沪深300 超额 + 量能 + 形态；量能与形态合计 28%）
+# 个股强度权重（量能与形态合计 28%）。截面 robust-z 对减去共同基准不变，
+# 因此排名直接用涨幅；超额另行保留给阶段判断，基准缺失也不丢掉价格分量。
 _STOCK_WEIGHTS = (
-    ("ex5", 0.28),
-    ("ex10", 0.22),
-    ("ex3", 0.14),
-    ("ex60", 0.08),
+    ("ret5", 0.28),
+    ("ret10", 0.22),
+    ("ret3", 0.14),
+    ("ret60", 0.08),
     ("volume", 0.20),
     ("ma20", 0.08),
 )
@@ -684,7 +684,7 @@ def _stock_stage(ex3, ex5, ex10) -> str:
 
 def _is_gem(code: str) -> bool:
     """创业板/科创板（20cm）：异动阈值 30%，与主板 20% 区分开。"""
-    return str(code or "").startswith(_GEM_PREFIXES)
+    return str(code or "").startswith(GROWTH_BOARD_CODE_PREFIXES)
 
 
 def _space_of(code: str, *, streak: int = 0, excess3=None, excess10=None) -> dict:
@@ -1486,12 +1486,12 @@ def build_candidates(
 
 
 def _add_excess(frame: pd.DataFrame, benchmark: dict, tech_by_code: dict) -> pd.DataFrame:
-    """加相对沪深300 超额（ex3/5/10/60）与 rel_vol 列；基准缺口按 0 处理。"""
+    """加相对沪深300 超额（ex3/5/10/60）与 rel_vol 列；基准缺口保留为空。"""
     for horizon in _BENCHMARK_HORIZONS:
         key = f"ret{horizon}"
         bench = finite_float(benchmark.get(f"ret{horizon}_hs300"))
         if bench is None or key not in frame.columns:
-            frame[f"ex{horizon}"] = 0.0
+            frame[f"ex{horizon}"] = float("nan")
         else:
             frame[f"ex{horizon}"] = (
                 pd.to_numeric(frame[key], errors="coerce").astype(float) - bench
@@ -1586,6 +1586,7 @@ def _stock_payload(
                 "vs_ma60_pct": _round(tech.get("vs_ma60_pct")),
                 "adx": _round(tech.get("adx")),
                 "macd_hist": _round(tech.get("macd_hist"), 3),
+                "prev_macd_hist": _round(tech.get("prev_macd_hist"), 3),
                 "close_loc": _round(tech.get("close_loc")),
                 "natr": _round(tech.get("natr")),
             }
@@ -1741,6 +1742,7 @@ def _launch_of(item: dict, tech: Optional[dict]) -> dict:
     vs60 = finite_float(tech.get("vs_ma60_pct"))
     close_loc = finite_float(tech.get("close_loc"))
     macd_hist = finite_float(tech.get("macd_hist"))
+    prev_macd_hist = finite_float(tech.get("prev_macd_hist"))
     plus_di = finite_float(tech.get("plus_di"))
     minus_di = finite_float(tech.get("minus_di"))
     change = finite_float(item.get("change_pct"))
@@ -1814,8 +1816,13 @@ def _launch_of(item: dict, tech: Optional[dict]) -> dict:
     )
     flag(
         "形态",
-        macd_hist is not None and macd_hist > 0,
-        f"MACD 柱翻红 {macd_hist:+.3f}" if macd_hist is not None else "MACD 柱缺数据",
+        macd_hist is not None and macd_hist > 0
+        and prev_macd_hist is not None and prev_macd_hist <= 0,
+        (
+            f"MACD 柱翻红（前日 {prev_macd_hist:+.3f} → 当日 {macd_hist:+.3f}）"
+            if macd_hist is not None and prev_macd_hist is not None
+            else "MACD 柱翻红缺数据"
+        ),
         _LAUNCH_SHAPE_POINTS,
     )
     flag(
@@ -1968,7 +1975,9 @@ def fetch_style_info() -> dict:
 
 
 def _fetch_zt_rows(quote_date: Optional[str]) -> list:
-    """涨停池（只拉涨停池：够算家数 / 高度 / 首板占比 / 行业集中度）。"""
+    """只取报价交易日的涨停池，避免用其他日期的连板和行业集中度参与判断。"""
+    if not quote_date:
+        return []
     try:
         import akshare as ak
     except ImportError as exc:  # pragma: no cover - 依赖缺失属环境问题
@@ -1976,26 +1985,9 @@ def _fetch_zt_rows(quote_date: Optional[str]) -> list:
 
     from stocks.util import force_direct_http
 
-    candidates: list[str] = []
-    if quote_date:
-        candidates.append(str(quote_date).replace("-", ""))
-    today = datetime.datetime.now(_TZ).date()
-    for offset in range(0, 7):
-        candidates.append((today - datetime.timedelta(days=offset)).strftime("%Y%m%d"))
-    seen: set = set()
-    for day in candidates:
-        if not day or day in seen:
-            continue
-        seen.add(day)
-        try:
-            with force_direct_http():
-                frame = ak.stock_zt_pool_em(date=day)
-        except Exception:
-            continue
-        if frame is None or frame.empty:
-            continue
-        return frame.to_dict(orient="records")
-    return []
+    with force_direct_http():
+        frame = ak.stock_zt_pool_em(date=str(quote_date).replace("-", ""))
+    return frame.to_dict(orient="records") if frame is not None and not frame.empty else []
 
 
 # ---------------------------------------------------------------- 组装
@@ -2244,7 +2236,7 @@ def analyze(
         except Exception as exc:
             errors.append(f"style:{type(exc).__name__}")
     if not style_info.get("ok"):
-        notes.append("风格/基准缺口：相对超额按 0 处理，个股强度退化为绝对涨幅+量能口径。")
+        notes.append("风格/基准缺口：相对超额留空，个股排名保留绝对涨幅、量能与可用形态。")
 
     # —— 4) 板块强度与市场结构 ——
     concept_scores = score_boards(concept_records)
@@ -2376,13 +2368,13 @@ def analyze(
         and (finite_float(r.get("price")) or 0.0) > 0
     ]
     # 先按量价粗排取前 N 只（启动标志需要日线），补完日线后再按标志分重建 payload
-    bottom_pre = rank_bottom(
-        bottom_pool,
-        limit=_BOTTOM_KLINE_LIMIT,
-        benchmark=style_info.get("benchmark"),
-        zt_streak=zt_streak,
-    )
-    bottom_codes = [r["code"] for r in bottom_pre]
+    bottom_pre = pd.DataFrame([r for r in bottom_pool if _is_bottom_start(r)])
+    bottom_codes = []
+    if not bottom_pre.empty:
+        bottom_pre["composite"] = _weighted_z(bottom_pre, _BOTTOM_WEIGHTS)
+        bottom_codes = [
+            r["code"] for r in _ranked_rows(bottom_pre)[:_BOTTOM_KLINE_LIMIT]
+        ]
 
     tech_map: dict[str, Any] = dict(tech_by_code or {})
     _fetch_tech_map([c["code"] for c in candidates] + bottom_codes, tech_map, errors)

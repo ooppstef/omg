@@ -76,6 +76,7 @@ def _tech(rel_vol=1.5, **fields) -> dict:
         "vs_ma60_pct": 12.0,
         "adx": 32.0,
         "macd_hist": 0.4,
+        "prev_macd_hist": -0.1,
         "dif": 0.5,
         "dea": 0.3,
         "close_loc": 0.9,
@@ -295,6 +296,17 @@ class TestFetchDegradation(unittest.TestCase):
         self.assertEqual([r["f12"] for r in rows], ["600001", "000001"])
         self.assertEqual(len([e for e in errors if e.startswith("market_top:")]), 2)
 
+    def test_limit_up_pool_never_substitutes_another_trade_date(self):
+        stale = pd.DataFrame([{"代码": "600001", "连板数": 5}])
+        with mock.patch("akshare.stock_zt_pool_em", side_effect=[pd.DataFrame(), stale]) as fetch:
+            self.assertEqual(strength._fetch_zt_rows(_DAY), [])
+        fetch.assert_called_once_with(date="20261016")
+
+    def test_limit_up_pool_requires_quote_date(self):
+        with mock.patch("akshare.stock_zt_pool_em") as fetch:
+            self.assertEqual(strength._fetch_zt_rows(None), [])
+        fetch.assert_not_called()
+
 
 class TestScoring(unittest.TestCase):
     def test_score_boards_percentile_is_monotonic_and_below_100(self):
@@ -405,10 +417,11 @@ class TestRegime(unittest.TestCase):
     def test_defensive_regime_in_narrow_dispersion_window(self):
         concepts = [
             _board(f"BK{i:03d}", f"弱{i}", f109=-6.0, f127=-2.0, f3=-1.0, f104=2, f105=8)
-            for i in range(24)
+            for i in range(22)
         ]
-        concepts.append(
-            _board("BK999", "略强", f109=-5.9, f127=-2.0, f3=-1.0, f104=2, f105=8)
+        concepts.extend(
+            _board(f"BK9{i:02d}", "略强", f109=-2.0, f127=-2.0, f3=-1.0, f104=2, f105=8)
+            for i in range(3)
         )
         regime = strength.compute_regime(
             _score(concepts),
@@ -416,6 +429,19 @@ class TestRegime(unittest.TestCase):
             style_state="红利防守",
         )
         self.assertEqual(regime["regime"], strength.REGIME_DEFENSIVE)
+        self.assertEqual(regime["metrics"]["dispersion"], 4.0)
+
+    def test_small_dispersion_during_broad_decline_is_not_a_theme_huddle(self):
+        concepts = [
+            _board(f"BK{i:03d}", f"弱{i}", f109=-7.0 + i * 0.04,
+                   f3=-1.0, f104=2, f105=8)
+            for i in range(25)
+        ]
+        regime = strength.compute_regime(
+            _score(concepts), sentiment={"ok": True, "industry_hhi": 0.01}
+        )
+        self.assertEqual(regime["metrics"]["dispersion"], 0.44)
+        self.assertEqual(regime["regime"], strength.REGIME_DOWN)
 
     def test_broad_regime_when_diffusion(self):
         concepts = [
@@ -692,7 +718,7 @@ class TestCandidates(unittest.TestCase):
             {
                 "rv20": 3.0, "rel_vol": 2.0, "mfi": 70.0,
                 "vs_ma20_pct": 3.0, "vs_ma60_pct": -1.0, "close_loc": 0.9,
-                "macd_hist": 0.2, "plus_di": 30.0, "minus_di": 10.0,
+                "macd_hist": 0.2, "prev_macd_hist": -0.1, "plus_di": 30.0, "minus_di": 10.0,
                 "ma5": 100.0, "ma10": 101.0, "ma20": 102.0,
             },
         )
@@ -732,7 +758,7 @@ class TestCandidates(unittest.TestCase):
 
         tech_ok = {
             "rv20": 3.0, "rel_vol": 2.0, "mfi": 70.0, "vs_ma20_pct": 3.0,
-            "vs_ma60_pct": -1.0, "close_loc": 0.9, "macd_hist": 0.2,
+            "vs_ma60_pct": -1.0, "close_loc": 0.9, "macd_hist": 0.2, "prev_macd_hist": 0.0,
             "plus_di": 30.0, "minus_di": 10.0, "ma5": 100.0, "ma10": 101.0, "ma20": 102.0,
         }
         # 甲量价弱但标志全中；乙量价强但无日线 → 标志分优先
@@ -745,19 +771,30 @@ class TestCandidates(unittest.TestCase):
         self.assertEqual(ranked[0]["launch"]["points"], 17.0)
         self.assertLess(ranked[1]["launch"]["points"], ranked[0]["launch"]["points"])
 
-    def test_rank_stocks_missing_benchmark_uses_zero_excess(self):
+    def test_macd_launch_requires_a_cross_from_nonpositive_to_positive(self):
+        for previous, current, points in ((-0.1, 0.2, 2.0), (0.0, 0.2, 2.0),
+                                          (0.1, 0.2, 0.0), (0.1, -0.2, 0.0),
+                                          (None, 0.2, 0.0)):
+            with self.subTest(previous=previous, current=current):
+                launch = strength._launch_of({}, {"macd_hist": current, "prev_macd_hist": previous})
+                self.assertEqual(launch["points"], points)
+
+    def test_rank_stocks_missing_benchmark_preserves_absolute_momentum(self):
         candidates = [
             {
-                "code": "600001", "name": "一号", "price": 10.0, "change_pct": 1.0, "ret3": 1.0,
-                "ret5": 1.0, "ret10": 1.0, "ret60": 1.0, "vol_ratio": 1.0, "turnover": 1.0,
+                "code": f"60000{i}", "name": str(i), "price": 10.0, "change_pct": 1.0,
+                "ret3": i * 4.0, "ret5": i * 6.0, "ret10": i * 8.0,
+                "ret60": i * 10.0, "vol_ratio": 1.0, "turnover": 1.0,
                 "amount": 1e7, "sources": [],
             }
+            for i in range(1, 4)
         ]
-        ranked = strength.rank_stocks(candidates, tech_by_code={"600001": _tech()})
-        # 基准缺口时超额按 0 处理（analyze 会在 notes 里声明），不做「假装有基准」
-        self.assertEqual(ranked[0]["excess5"], 0.0)
+        ranked = strength.rank_stocks(candidates)
+        self.assertEqual([r["code"] for r in ranked], ["600003", "600002", "600001"])
+        self.assertGreater(ranked[0]["score"], ranked[-1]["score"])
+        self.assertIsNone(ranked[0]["excess5"])
+        self.assertNotIn("相对沪深300", " ".join(ranked[0]["attribution"]["theme"]))
         self.assertEqual(ranked[0]["stage"], strength.STAGE_FLAT)
-        self.assertIsNotNone(ranked[0]["tech"])
         self.assertEqual(ranked[0]["role"], strength.ROLE_SOLO)
 
 
@@ -1125,6 +1162,23 @@ class TestAnalyze(unittest.TestCase):
         # meta 只留计数，不回显入参
         self.assertNotIn("max_stocks", payload["meta"])
         self.assertNotIn("turn_extra", payload["meta"])
+
+    def test_bottom_kline_budget_uses_volume_price_score_before_launch_flags(self):
+        bottom = [
+            _stock("600001", "强量价", f3=4.9, f127=5.0, f109=3.0, f160=4.0, f24=5.0, f10=4.0),
+            _stock("600002", "刚达大阳", f3=5.0, f127=1.0, f109=3.0, f160=4.0, f24=5.0, f10=1.5),
+            _stock("600003", "普通", f3=2.0, f127=3.0, f109=3.0, f160=4.0, f24=5.0, f10=2.0),
+        ]
+        with mock.patch.object(strength, "_BOTTOM_KLINE_LIMIT", 1), mock.patch.object(
+            strength, "_fetch_tech_map"
+        ) as fetch:
+            strength.analyze(
+                board_rows={"concept": [_board("BK1", "题材")], "industry": []},
+                members_by_board={}, market_top_rows=[], zt_rows=[],
+                style_payload={"ok": True, "benchmark": dict(_BENCHMARK)},
+                bottom_rows=bottom,
+            )
+        self.assertEqual(fetch.call_args.args[0], ["600001"])
 
     def test_analyze_raises_without_any_data(self):
         with self.assertRaises(ValueError):

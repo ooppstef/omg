@@ -299,12 +299,35 @@ def _batch_fetch(codes, start, conn, table, label, progress):
     fail_samples = []
     batch = []
     sql = f"INSERT OR REPLACE INTO {table} VALUES (?,?,?,?,?,?,?,?,?,?)"
+    last_dates = dict(conn.execute(f"SELECT code, MAX(trade_date) FROM {table} GROUP BY code"))
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futs = {pool.submit(_fetch_one, c, start): c for c in codes}
+        futs = {
+            pool.submit(_fetch_one, c, min(start, last_dates.get(c, start))): c
+            for c in codes
+        }
         for fut in as_completed(futs):
             done += 1
             code, rows, err = fut.result()
+            if not err and rows and code in last_dates:
+                overlap = next((row for row in rows if row[1] == last_dates[code]), None)
+                previous = conn.execute(
+                    f"SELECT open, high, low, close FROM {table} WHERE code=? AND trade_date=?",
+                    (code, last_dates[code]),
+                ).fetchone()
+                # 前复权会随分红送转重算历史价格；重叠日变价时，整只刷新才不会拼出假跳空。
+                if overlap is not None and previous != overlap[2:6]:
+                    first, count = conn.execute(
+                        f"SELECT MIN(trade_date), COUNT(*) FROM {table} WHERE code=?", (code,)
+                    ).fetchone()
+                    expected_end = rows[-1][1]
+                    code, rows, err = _fetch_one(code, first)
+                    if not err and (
+                        len(rows) < count or rows[0][1] > first or rows[-1][1] < expected_end
+                    ):
+                        err = RuntimeError("前复权历史未完整刷新")
+                    if not err:
+                        conn.execute(f"DELETE FROM {table} WHERE code=?", (code,))
             if err:
                 fail += 1
                 if len(fail_samples) < 5:
