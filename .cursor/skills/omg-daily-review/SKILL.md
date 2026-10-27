@@ -182,6 +182,16 @@ print(answer)
 - [ ] 失败维度已声明
 - [ ] 无仓位比例、目标价、下单指令
 
+## HTML 归档（本地约定）
+
+生成 HTML 复盘时，默认把最终文件归档到当前用户桌面；项目内可保留工作副本。
+
+- 目录：`<运行日期 YYYY_MM_DD>_复盘/`（Windows / macOS 都取用户 Desktop；Windows 优先 OneDrive Desktop）
+- 文件：`<数据日 YYYY_MM_DD>_复盘.html`；盘前归档前一交易日时，文件名仍用数据日，避免把数据日写成生成日
+- 归档命令：`python scripts/save_daily_review.py <html> --date <数据日>`
+
+示例：10/27 盘前归档 10/26 收盘复盘 → `~/Desktop/2026_10_27_复盘/2026_10_26_复盘.html`。
+
 ## 示例触发
 
 用户：`帮我复盘一下今天`
