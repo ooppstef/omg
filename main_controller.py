@@ -92,7 +92,7 @@ def _run_chat(argv):
 
         rows = ai_skills.list_skills()
         if not rows:
-            print("未找到内置 skill 或 .cursor/skills/*/SKILL.md")
+            print("未找到内置 skill（可检查 stocks/ai/bundled_skills/）")
             return 1
         for row in rows:
             desc = row["description"]

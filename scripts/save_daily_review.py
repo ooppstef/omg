@@ -13,66 +13,18 @@ macOS / Windows 都会自动找当前用户的 Desktop（Windows 优先 OneDrive
 用法：
     python scripts/save_daily_review.py output/review.html --date 2026-10-26
     python scripts/save_daily_review.py output/review.html --date 2026-10-27 --open
+
+渲染 + 归档一步到位：
+    python scripts/render_daily_review.py output/review_body.html --date 2026-10-27 --archive
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
-import subprocess
-import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
-
-def desktop_dir() -> Path:
-    """返回当前用户的桌面目录；找不到时创建 ~/Desktop。"""
-    home = Path.home()
-    candidates: list[Path] = []
-
-    if sys.platform.startswith("win"):
-        for env in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-            value = os.environ.get(env)
-            if value:
-                candidates.append(Path(value) / "Desktop")
-        profile = os.environ.get("USERPROFILE")
-        if profile:
-            candidates.append(Path(profile) / "Desktop")
-        candidates.append(home / "Desktop")
-    else:
-        xdg = os.environ.get("XDG_DESKTOP_DIR")
-        if xdg:
-            candidates.append(Path(xdg).expanduser())
-        candidates.append(home / "Desktop")
-
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-
-    fallback = home / "Desktop"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
-
-
-def parse_date(raw: str | None) -> date:
-    if not raw:
-        return date.today()
-    for fmt in ("%Y-%m-%d", "%Y_%m_%d", "%Y%m%d"):
-        try:
-            return datetime.strptime(raw, fmt).date()
-        except ValueError:
-            continue
-    raise SystemExit(f"无法识别日期: {raw}（支持 2026-10-26 / 2026_10_26 / 20261026）")
-
-
-def open_file(path: Path) -> None:
-    if sys.platform == "darwin":
-        subprocess.run(["open", str(path)], check=False)
-    elif sys.platform.startswith("win"):
-        os.startfile(path)  # type: ignore[attr-defined]
-    else:
-        subprocess.run(["xdg-open", str(path)], check=False)
+from stocks import review_html
 
 
 def main() -> int:
@@ -90,18 +42,21 @@ def main() -> int:
     if not source.is_file():
         raise SystemExit(f"文件不存在: {source}")
 
-    data_date = parse_date(args.data_date)
-    folder = desktop_dir() / f"{date.today():%Y_%m_%d}_复盘"
-    folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / f"{data_date:%Y_%m_%d}_复盘.html"
+    try:
+        data_date = review_html.parse_date(args.data_date)
+    except review_html.ReviewHTMLError as exc:
+        raise SystemExit(str(exc)) from exc
 
+    dest = (
+        review_html.desktop_dir()
+        / f"{date.today():%Y_%m_%d}_复盘"
+        / f"{data_date:%Y_%m_%d}_复盘.html"
+    )
     existed = dest.exists()
-    if source != dest.resolve():
-        shutil.copy2(source, dest)
-
+    dest = review_html.archive(source, data_date)
     print(f"{'覆盖' if existed else '已归档'}: {dest}")
     if args.open:
-        open_file(dest)
+        review_html.open_file(dest)
     return 0
 
 

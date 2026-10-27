@@ -14,6 +14,37 @@ description: >
 
 用 `omg` 确定性行情取证，再写成**信息密度高、篇幅中等**的中文复盘。结论必须来自工具结果；禁止编造数字/阶段，也禁止空泛套话和大段表格。工具里的阶段、状态和分数是**描述性启发式规则标签**，不是未来收益概率或已经回测验证的 alpha。
 
+## HTML 交付（默认）
+
+日复盘最终交付物是**固定版式 HTML**，不是聊天里的 Markdown 全文。Markdown 只作为内容草稿。
+
+- 固定外壳：`stocks/templates/daily_review.html`（CSS/JS + `{{TITLE}}` / `{{BODY}}`）
+- 渲染器：`python scripts/render_daily_review.py <body.html> --title "..." --date YYYY-MM-DD --archive`
+- Body 必须是片段，自带 `masthead` / `toc` / `main` / `footer`，并包含 8 个 section id：
+  `conclusion` / `market` / `themes` / `rank` / `strength` / `watch` / `bottom` / `board`。
+- 不要写 `<html>` / `<body>` / `<script>`；也不要写 `skip` / `progress` / `to-top`，这些固定 chrome 由外壳提供。
+- 归档：`<运行日>_复盘/<数据日>_复盘.html`，由渲染器自动完成。
+- 回复用户时只给归档路径 + 1–3 句结论摘要，不要贴 Markdown 全文。
+- 若运行环境不能写文件：输出完整 HTML body 片段，并明确写“未归档”，不要退化成 Markdown 全文。
+
+最小骨架（class 细节参考模板内 CSS）：
+
+```html
+<header class="wrap masthead">...</header>
+<nav class="toc" aria-label="章节导航">...</nav>
+<main id="main" class="wrap">
+  <section class="section" id="conclusion">...</section>
+  <section class="section" id="market">...</section>
+  <section class="section" id="themes">...</section>
+  <section class="section" id="rank">...</section>
+  <section class="section" id="strength">...</section>
+  <section class="section" id="watch">...</section>
+  <section class="section" id="bottom">...</section>
+  <section class="section" id="board">...</section>
+</main>
+<footer class="wrap footer">...</footer>
+```
+
 ## When to Use
 
 - 「今天怎么看」「帮我复盘」「复盘一下」「今日复盘」「做个日复盘」「做个复盘」
@@ -30,7 +61,7 @@ description: >
 - 全市场 `filter` 筛票
 - 要具体仓位比例、目标价、下单指令（可给操作倾向；指标/条件见「关注建议」，个股观察见「底部启动 / 推荐关注」）
 
-## 如何启动（人类 / Cursor）
+## 如何启动（人类 / omg chat）
 
 在 **omg chat** 里启用本 skill（注入 system；不是 OpenAI 云端 Skills API）：
 
@@ -45,11 +76,11 @@ omg chat "帮我复盘一下今天，给操作建议、关注建议、底部启�
 ```python
 from stocks.ai.chat import run_once
 
-answer = run_once(
+path = run_once(
     "帮我复盘一下今天，并给出操作建议、关注建议、底部启动和推荐关注",
     skill="omg-daily-review",
 )
-print(answer)
+print(path)  # 默认返回已归档 HTML 路径；OMG_CHAT_HTML=0 可关闭
 ```
 
 若已在 `omg chat` 会话中：忽略上面启动示例，直接按下方取证维度调用已注册 tools。
@@ -95,6 +126,8 @@ print(answer)
 13. **`strength` 与 `rot`/`hot` 并行不冲突**：三者口径不同（rot 是超额×量能分组、hot 是概念强度 Top、strength 是主题线合并 + 个股精算）。冲突时并列写出，不要择一掩盖；`strength.quote_trade_date` 可用于校验其他维度的交易日。
 
 ## 输出模板（必须遵守）
+
+> 下面是**内容结构草稿**；最终交付按「HTML 交付（默认）」渲染成 HTML。不要把这段 Markdown 直接作为最终回复。
 
 目标体量：约两屏到四屏（`## 近期强势` 与自选逐票会拉长；仍保持可扫读，忌注水）。
 
@@ -180,6 +213,7 @@ print(answer)
 - [ ] 「关注建议」无具体代码/名称清单；`## 推荐关注` / `## 底部启动` 无指标罗列顶替个股
 - [ ] 操作建议、关注建议、底部启动、推荐关注都能指回依据/涨跌榜/近期强势/自选/tool
 - [ ] 失败维度已声明
+- [ ] 已按固定 HTML 交付：8 个 section 齐全，归档到桌面，回复只给路径 + 1～3 句摘要
 - [ ] 无仓位比例、目标价、下单指令
 
 ## 示例触发

@@ -1,4 +1,4 @@
-"""加载内置或项目 .cursor/skills 中的 SKILL.md，供 omg chat 注入 system。"""
+"""加载内置 skill（可选项目 .cursor/skills 覆盖），供 omg chat 注入 system。"""
 
 from __future__ import annotations
 

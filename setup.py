@@ -49,6 +49,7 @@ setup(
         "stocks": [
             "etf_universe.csv",
             "ai/bundled_skills/*/SKILL.md",
+            "templates/*.html",
         ]
     },
     include_package_data=True,

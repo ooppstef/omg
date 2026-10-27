@@ -35,7 +35,7 @@ omg wencai "今日涨停"      # 问财自然语言查询（同花顺），如 �
 
 ### 4. 内置 skills：自动加载 / 手动加载
 
-内置 skills 随项目分发在 `stocks/ai/bundled_skills/`（`omg-daily-review` 日复盘、`omg-theme-research` 主题研究）。源码目录下的 `.cursor/skills/*/SKILL.md` 会优先加载，可用于本地覆盖同名 skill。加载方式有两种：
+内置 skills 随项目分发在 `stocks/ai/bundled_skills/`（`omg-daily-review` 日复盘、`omg-theme-research` 主题研究）。若存在 `.cursor/skills/*/SKILL.md`，会优先加载用于本地覆盖；它不是项目运行的必要依赖。加载方式有两种：
 
 **自动加载**：首问命中关键词即自动注入对应 skill，无需指定。
 
@@ -54,7 +54,19 @@ omg chat --skill omg-daily-review      # 强制挂载日复盘
 omg chat --skill omg-theme-research    # 强制挂载主题研究
 ```
 
-两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / list / rank / theme / wencai / watch_advice），并同时打开 research（更多 tool 预算）。日复盘最终按模板输出：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 风险 / 操作建议 / 关注建议 / 底部启动 / 推荐关注。
+两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / list / rank / theme / wencai / watch_advice），并同时打开 research（更多 tool 预算）。日复盘的内容模板为：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 风险 / 操作建议 / 关注建议 / 底部启动 / 推荐关注。
+
+### 5. 日复盘 HTML（默认交付）
+
+日复盘默认交付固定版式 HTML，不再把 Markdown 全文当最终结果。HTML 外壳与样式在 `stocks/templates/daily_review.html`，渲染器：
+
+```sh
+python scripts/render_daily_review.py output/review_body.html \
+  --title "A 股日复盘 · 数据日 2026-10-27" \
+  --date 2026-10-27 --archive --open
+```
+
+`review_body.html` 是 HTML 片段，需包含 8 个 section：结论 / 盘面仪表 / 主线与轮动 / 涨跌榜 / 近期强势 / 自选操作建议 / 底部启动与推荐关注 / 风险与动作。渲染器会自动补全 CSS/JS 外壳，并按 `<运行日>_复盘/<数据日>_复盘.html` 归档到桌面。`omg chat` 启用日复盘 skill 时也会在回答完成后自动落成 HTML；设置 `OMG_CHAT_HTML=0` 可关闭。
 
 ## 其他命令
 
@@ -103,7 +115,7 @@ OMG_LLM_MODEL=your-model
 OMG_LLM_TIMEOUT=120        # 可选，秒，1..600；不填默认 60
 ```
 
-其他可选配置（shell 环境变量；`omg chat` 也会读取 `.env` 中的同名项）：`OMG_SEARCH_MAX_RESULTS`（web_search 条数，默认 5，1..20）、`OMG_MOOD_DAYS` / `OMG_STYLE_DAYS`（趋势天数，默认 8）、`OMG_ETF_MAX`（只扫前 N 只 ETF，便于快速试跑）。`OMG_DISABLE_DOTENV=1` 只能通过 shell 环境变量设置，用于跳过 `.env`。
+其他可选配置（shell 环境变量；`omg chat` 也会读取 `.env` 中的同名项）：`OMG_SEARCH_MAX_RESULTS`（web_search 条数，默认 5，1..20）、`OMG_MOOD_DAYS` / `OMG_STYLE_DAYS`（趋势天数，默认 8）、`OMG_ETF_MAX`（只扫前 N 只 ETF，便于快速试跑）、`OMG_CHAT_HTML=0`（关闭 `omg chat` 日复盘自动落 HTML）。`OMG_DISABLE_DOTENV=1` 只能通过 shell 环境变量设置，用于跳过 `.env`。
 
 除 `omg chat` 外，其他命令不需要配置大模型。
 
