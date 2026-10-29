@@ -249,6 +249,18 @@ def _tool_strength(args: dict) -> dict:
     return _ok(data)
 
 
+def _tool_leaders(args: dict) -> dict:
+    import stocks.leaders as leaders
+
+    theme = str(args.get("theme") or leaders.DEFAULT_THEME).strip()
+    top = _int_arg(args, "top", leaders.DEFAULT_TOP, leaders.MAX_TOP)
+    with _quiet():
+        data = leaders.analyze(theme=theme, top=top)
+    if not data.get("leaders"):
+        return _err("龙头分时数据不足")
+    return _ok(data)
+
+
 def _tool_list(_args: dict) -> dict:
     from concurrent.futures import ThreadPoolExecutor
 
@@ -418,6 +430,7 @@ _HANDLERS: dict[str, Callable[[dict], dict]] = {
     "etf": _tool_etf,
     "hot": _tool_hot,
     "strength": _tool_strength,
+    "leaders": _tool_leaders,
     "list": _tool_list,
     "rank": _tool_rank,
     "theme": _tool_theme,
@@ -672,6 +685,33 @@ def schemas() -> list[dict]:
                             "description": "逐只精算日线的候选上限，默认 24；调大更慢",
                             "minimum": 1,
                             "maximum": 60,
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "leaders",
+                "description": (
+                    "主线龙头的当日分时体检（S 点/退潮前置信号）：问财取近 10 日涨幅前 N 的题材股，"
+                    "再用新浪日线补当日开/高/低/收，逐只算最大涨幅、收盘涨幅、回落 pp、是否触板后开板；"
+                    "输出 stage=未触发/S点预警/S点确认（分时）。补的是收盘 breadth 看不到的"
+                    "“龙头当涨不涨、带头杀跌、板块大量开板”。stage/score 是规则标签，不是预测。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "theme": {
+                            "type": "string",
+                            "description": "题材名，如 机器人 / 物理AI；默认 机器人",
+                        },
+                        "top": {
+                            "type": "integer",
+                            "description": "取近 10 日涨幅前 N 只龙头，默认 10，最大 20",
+                            "minimum": 3,
+                            "maximum": 20,
                         },
                     },
                 },

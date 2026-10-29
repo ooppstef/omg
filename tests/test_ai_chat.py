@@ -82,7 +82,7 @@ class TestTools(unittest.TestCase):
         names = {s["function"]["name"] for s in ai_tools.schemas()}
         self.assertEqual(
             names,
-            {"mood", "style", "rot", "crowd", "etf", "hot", "strength", "list", "rank", "theme", "wencai", "watch_advice", "web_search"},
+            {"mood", "style", "rot", "crowd", "etf", "hot", "strength", "leaders", "list", "rank", "theme", "wencai", "watch_advice", "web_search"},
         )
 
     def test_unknown_tool(self):
@@ -802,6 +802,7 @@ class TestSkills(unittest.TestCase):
         self.assertIn("## 涨跌榜", skill["body"])
         self.assertIn("不含涨跌榜", skill["body"])
         self.assertIn("watch_advice", skill["body"])
+        self.assertIn("leaders", skill["body"])
         self.assertIn("skip_board", skill["body"])
         self.assertIn("## 自选操作建议", skill["body"])
         self.assertIn("用本轮", skill["body"])

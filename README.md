@@ -54,7 +54,7 @@ omg chat --skill omg-daily-review      # 强制挂载日复盘
 omg chat --skill omg-theme-research    # 强制挂载主题研究
 ```
 
-两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / list / rank / theme / wencai / watch_advice），并同时打开 research（更多 tool 预算）。日复盘的内容模板为：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 风险 / 操作建议 / 关注建议 / 底部启动 / 推荐关注。
+两种方式挂载后，skill 会把取证流程注入 system（按需调本地行情 tools：mood / style / rot / crowd / etf / hot / strength / leaders / list / rank / theme / wencai / watch_advice），并同时打开 research（更多 tool 预算）。日复盘的内容模板为：结论 / 依据 / 涨跌榜 / 近期强势 / 自选操作建议 / 风险 / 操作建议 / 关注建议 / 底部启动 / 推荐关注。其中 `leaders` 专门做 S 点：取近 10 日涨幅前 N 的题材龙头，用当日开/高/低/收算最大涨幅、收盘涨幅、回落 pp、触板开板，输出「未触发 / S点预警 / S点确认（分时）」，补收盘宽度看不到的龙头负反馈。
 
 ### 5. 日复盘 HTML（默认交付）
 
